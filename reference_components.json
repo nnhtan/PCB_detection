@@ -1,0 +1,96 @@
+{
+  "image": "2.jpg",
+  "image_width": 1022,
+  "image_height": 417,
+  "components_count": 11,
+  "components": [
+    {
+      "id": 1,
+      "class_id": 6,
+      "class": "capacitor",
+      "confidence_reference": 0.9708,
+      "x": 224.38,
+      "y": 196.13
+    },
+    {
+      "id": 2,
+      "class_id": 12,
+      "class": "inductor",
+      "confidence_reference": 0.9677,
+      "x": 453.55,
+      "y": 146.14
+    },
+    {
+      "id": 3,
+      "class_id": 1,
+      "class": "IC",
+      "confidence_reference": 0.9582,
+      "x": 710.18,
+      "y": 271.64
+    },
+    {
+      "id": 4,
+      "class_id": 9,
+      "class": "diode",
+      "confidence_reference": 0.9473,
+      "x": 750.84,
+      "y": 39.67
+    },
+    {
+      "id": 5,
+      "class_id": 15,
+      "class": "resistor",
+      "confidence_reference": 0.8595,
+      "x": 560.73,
+      "y": 375.58
+    },
+    {
+      "id": 6,
+      "class_id": 18,
+      "class": "variable resistor",
+      "confidence_reference": 0.8116,
+      "x": 429.86,
+      "y": 347.51
+    },
+    {
+      "id": 7,
+      "class_id": 15,
+      "class": "resistor",
+      "confidence_reference": 0.7687,
+      "x": 307.62,
+      "y": 359.59
+    },
+    {
+      "id": 8,
+      "class_id": 15,
+      "class": "resistor",
+      "confidence_reference": 0.7471,
+      "x": 866.73,
+      "y": 89.7
+    },
+    {
+      "id": 9,
+      "class_id": 6,
+      "class": "capacitor",
+      "confidence_reference": 0.6988,
+      "x": 559.94,
+      "y": 304.84
+    },
+    {
+      "id": 10,
+      "class_id": 6,
+      "class": "capacitor",
+      "confidence_reference": 0.6867,
+      "x": 931.96,
+      "y": 200.29
+    },
+    {
+      "id": 12,
+      "class_id": 6,
+      "class": "capacitor",
+      "confidence_reference": 0.4079,
+      "x": 260.93,
+      "y": 360.0
+    }
+  ]
+}

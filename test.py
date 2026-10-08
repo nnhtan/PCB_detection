@@ -1,8 +1,10 @@
 import json
 import os
+import sys
 import threading
 import time
 from collections import Counter, deque
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -10,6 +12,7 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+sys.setrecursionlimit(5000)  # ghép linh kiện dùng đệ quy (augmenting path)
 
 # ============================================================
 # 1. CẤU HÌNH
@@ -29,10 +32,11 @@ try:
 except ValueError:
     SOURCE = SOURCE_VALUE
 CAMERA_STARTUP_TIMEOUT_SECONDS = 10
+CAMERA_RECONNECT_AFTER_SECONDS = 3   # mất hình quá lâu thì tự mở lại camera
 
 # ---- Nhận diện ----
-SMOOTHING_WINDOW = 1            # phản hồi ngay theo kết quả quét mới nhất
-CONTRAST_ALPHA = 1.15           # tăng tương phản nhẹ khi xử lý ảnh nhận diện
+SMOOTHING_WINDOW = 1
+CONTRAST_ALPHA = 1.15
 CONTRAST_BETA = -10
 
 # ---- YOLO (PHẢI GIỐNG machpcbgoc.py) ----
@@ -43,10 +47,10 @@ USE_CUDA = torch.cuda.is_available()
 DEVICE = 0 if USE_CUDA else "cpu"
 
 # ---- So sánh vị trí ----
-MATCH_TOLERANCE_RATIO = 0.045   # sai số vị trí sau căn chỉnh
-MISSING_ALLOWED = 0             # cho phép thiếu tối đa bao nhiêu linh kiện
-EXTRA_ALLOWED = 2               # cho phép thừa tối đa bao nhiêu linh kiện
-EXTRA_MIN_CONF = 0.50           # box thừa phải có conf >= giá trị này mới tính là thừa
+MATCH_TOLERANCE_RATIO = 0.045
+MISSING_ALLOWED = 0
+EXTRA_ALLOWED = 2
+EXTRA_MIN_CONF = 0.50
 
 # ---- ORB ----
 USE_ORB_ALIGNMENT = True
@@ -56,11 +60,11 @@ MIN_GOOD_MATCHES = 10
 MIN_INLIERS = 8
 MIN_INLIER_RATIO = 0.40
 RANSAC_THRESHOLD = 5.0
-MIN_BOARD_AREA_RATIO = 0.03     # PCB chiếm tối thiểu 3% khung hình
+MIN_BOARD_AREA_RATIO = 0.03
 MAX_BOARD_AREA_RATIO = 2.00
 
 # ---- Cắt khung PCB ----
-BOARD_DETECTION_SIZE = (640, 320)
+BOARD_DETECTION_SIZE = (640, 240)
 BOARD_CONTOUR_MIN_AREA = 20000
 BOARD_PADDING_RATIO = 0.05
 
@@ -70,6 +74,7 @@ WINDOW_RESULT = "PCB Scan Result"
 DISPLAY_WIDTH = 720
 DISPLAY_HEIGHT = 480
 SHOW_RESULT_WINDOW = True
+SHOW_FULL_FRAME_RESULT = False  # True: kết quả vẽ trên toàn khung hình; False: chỉ hiện PCB đã cắt
 
 # ---- Trạng thái ----
 STATUS_FAULTY = "FAULTY"
@@ -83,7 +88,7 @@ STATUS_TEXT_IMAGE = {
     STATUS_FAULTY: "PCB FAULTY",
     STATUS_OK: "PCB OK",
 }
-STATUS_COLOR = {                       # BGR
+STATUS_COLOR = {  # BGR
     STATUS_FAULTY: (0, 0, 255),
     STATUS_OK: (0, 255, 0),
 }
@@ -99,6 +104,7 @@ CLASS_ALIASES = {
 }
 
 
+@lru_cache(maxsize=None)
 def normalize_component_class(class_name):
     normalized = " ".join(
         str(class_name).casefold().replace("-", " ").replace("_", " ").split()
@@ -111,36 +117,48 @@ def normalize_component_class(class_name):
 # ============================================================
 
 class CameraStream:
-    """Luôn đọc frame mới nhất trong nền."""
+    """Luôn đọc frame mới nhất trong nền, tự kết nối lại khi mất hình."""
 
     def __init__(self, source):
-        self.cap = cv2.VideoCapture(source)
-        try:
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
-
+        self.source = source
+        self.cap = self._open()
         self.lock = threading.Lock()
         self.frame = None
         self.frame_id = 0
-        self.running = True
+        self.stop_event = threading.Event()
+        self.thread = None
 
         if self.cap.isOpened():
             self.thread = threading.Thread(target=self._loop, daemon=True)
             self.thread.start()
 
+    def _open(self):
+        cap = cv2.VideoCapture(self.source)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
     def is_opened(self):
         return self.cap.isOpened()
 
     def _loop(self):
-        while self.running:
+        last_ok = time.monotonic()
+        while not self.stop_event.is_set():
             ret, frame = self.cap.read()
-            if not ret or frame is None:
-                time.sleep(0.02)
+            if ret and frame is not None:
+                last_ok = time.monotonic()
+                # cap.read() luôn cấp mảng mới nên không cần copy
+                with self.lock:
+                    self.frame = frame
+                    self.frame_id += 1
                 continue
-            with self.lock:
-                self.frame = frame
-                self.frame_id += 1
+
+            if time.monotonic() - last_ok > CAMERA_RECONNECT_AFTER_SECONDS:
+                print("[WARN] Mất tín hiệu camera, đang kết nối lại...", flush=True)
+                self.cap.release()
+                self.cap = self._open()
+                last_ok = time.monotonic()
+            else:
+                self.stop_event.wait(0.02)
 
     def read(self):
         with self.lock:
@@ -149,15 +167,15 @@ class CameraStream:
     def wait_for_frame(self, timeout_seconds):
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            frame, _ = self.read()
-            if frame is not None:
+            if self.read()[0] is not None:
                 return True
             time.sleep(0.02)
         return False
 
     def stop(self):
-        self.running = False
-        time.sleep(0.1)
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
         self.cap.release()
 
 
@@ -210,201 +228,67 @@ def load_reference_image():
 
 
 # ============================================================
-# 4. ORB + HOMOGRAPHY
+# 4. YOLO
 # ============================================================
 
-def build_reference_orb(reference_image):
-    orb = cv2.ORB_create(nfeatures=ORB_FEATURES)
-    gray = cv2.cvtColor(reference_image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-
-    keypoints, descriptors = orb.detectAndCompute(gray, None)
-
-    if descriptors is None:
-        raise RuntimeError("Không tạo được ORB descriptor cho ảnh reference.")
-    if len(keypoints) < MIN_GOOD_MATCHES:
-        raise RuntimeError(
-            f"Reference chỉ có {len(keypoints)} keypoints. Không đủ để căn chỉnh PCB."
-        )
-    return orb, keypoints, descriptors
+def adjust_contrast(image):
+    return cv2.convertScaleAbs(image, alpha=CONTRAST_ALPHA, beta=CONTRAST_BETA)
 
 
-def is_valid_homography(H, ref_shape, frame_shape):
-    """Kiểm tra H có cho ra hình dạng PCB hợp lý trong khung hình không."""
-    rh, rw = ref_shape[:2]
-    fh, fw = frame_shape[:2]
-
-    if not np.all(np.isfinite(H)):
-        return False
-    if abs(np.linalg.det(H[:2, :2])) < 1e-6:
-        return False
-
-    try:
-        H_inv = np.linalg.inv(H)
-    except np.linalg.LinAlgError:
-        return False
-
-    corners = np.float32([[0, 0], [rw, 0], [rw, rh], [0, rh]]).reshape(-1, 1, 2)
-    quad = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2).astype(np.float32)
-
-    if not np.all(np.isfinite(quad)):
-        return False
-    if not cv2.isContourConvex(quad):
-        return False
-
-    area = cv2.contourArea(quad)
-    frame_area = float(fw * fh)
-    return MIN_BOARD_AREA_RATIO * frame_area < area < MAX_BOARD_AREA_RATIO * frame_area
-
-
-def compute_homography(ref_kp, ref_desc, ref_shape, frame, orb):
-    """Trả về H (khung hình -> ảnh gốc). None nếu không thấy PCB."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-
-    frame_kp, frame_desc = orb.detectAndCompute(gray, None)
-
-    if frame_desc is None or frame_kp is None:
-        return None
-    if len(frame_kp) < MIN_GOOD_MATCHES:
-        return None
-
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-    try:
-        matches = matcher.knnMatch(frame_desc, ref_desc, k=2)
-    except cv2.error:
-        return None
-
-    good = []
-    for pair in matches:
-        if len(pair) < 2:
-            continue
-        m, n = pair
-        if m.distance < RATIO_TEST * n.distance:
-            good.append(m)
-
-    if len(good) < MIN_GOOD_MATCHES:
-        return None
-
-    src_pts = np.float32([frame_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-    dst_pts = np.float32([ref_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-
-    H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, RANSAC_THRESHOLD)
-    if H is None or mask is None:
-        return None
-
-    inliers = int(mask.ravel().sum())
-    if inliers < MIN_INLIERS or inliers / len(good) < MIN_INLIER_RATIO:
-        return None
-
-    if not is_valid_homography(H, ref_shape, frame.shape):
-        return None
-
-    return H
-
-
-def transform_point_to_reference(x, y, H):
-    point = np.array([[[float(x), float(y)]]], dtype=np.float32)
-    rx, ry = cv2.perspectiveTransform(point, H)[0, 0]
-    return float(rx), float(ry)
-
-
-def estimate_component_alignment(reference_components, detections, tolerance):
-    reference_by_class = {}
-    detections_by_class = {}
-
-    for component in reference_components:
-        class_name = normalize_component_class(component["class"])
-        reference_by_class.setdefault(class_name, []).append(component)
-    for detection in detections:
-        class_name = normalize_component_class(detection["class"])
-        if detection["confidence"] >= CONF:
-            detections_by_class.setdefault(class_name, []).append(detection)
-
-    source_points = []
-    reference_points = []
-    for class_name, reference_items in reference_by_class.items():
-        class_detections = detections_by_class.get(class_name, [])
-        if len(reference_items) != 1 or len(class_detections) != 1:
-            continue
-
-        source_points.append(
-            [class_detections[0]["cx"], class_detections[0]["cy"]]
-        )
-        reference_points.append(
-            [float(reference_items[0]["x"]), float(reference_items[0]["y"])]
-        )
-
-    if len(source_points) < 3:
-        return None
-
-    affine, inlier_mask = cv2.estimateAffine2D(
-        np.float32(source_points),
-        np.float32(reference_points),
-        method=cv2.RANSAC,
-        ransacReprojThreshold=tolerance,
-        maxIters=5000,
-        confidence=0.99,
-        refineIters=20,
+def detect_components(model, frame):
+    results = model.predict(
+        source=frame,
+        conf=CONF,
+        imgsz=IMGSZ,
+        device=DEVICE,
+        half=USE_CUDA,
+        max_det=MAX_DET,
+        agnostic_nms=True,
+        verbose=False,
     )
-    if affine is None or inlier_mask is None:
-        return None
-    if int(inlier_mask.sum()) < 3:
-        return None
+    if not results:
+        return []
 
-    inlier_source = np.float32(source_points)[inlier_mask.ravel() == 1]
-    inlier_reference = np.float32(reference_points)[inlier_mask.ravel() == 1]
-    projected = cv2.transform(inlier_source.reshape(-1, 1, 2), affine).reshape(-1, 2)
-    mean_error = float(np.linalg.norm(projected - inlier_reference, axis=1).mean())
-    if mean_error > tolerance:
-        return None
+    boxes = results[0].boxes
+    if boxes is None or len(boxes) == 0:
+        return []
 
-    homography = np.eye(3, dtype=np.float64)
-    homography[:2, :] = affine
-    return homography
+    # Chuyển cả lô sang CPU một lần (tránh đồng bộ GPU cho từng box).
+    xyxy = boxes.xyxy.cpu().numpy().astype(np.float64)
+    confs = boxes.conf.cpu().numpy().tolist()
+    cls_ids = boxes.cls.cpu().numpy().astype(int).tolist()
+    cx = ((xyxy[:, 0] + xyxy[:, 2]) / 2.0).tolist()
+    cy = ((xyxy[:, 1] + xyxy[:, 3]) / 2.0).tolist()
+    names = model.names
 
-
-def attach_reference_box_sizes(reference_components, model, reference_image):
-    detection_image = cv2.convertScaleAbs(
-        reference_image, alpha=CONTRAST_ALPHA, beta=CONTRAST_BETA
-    )
-    reference_detections = detect_components(model, detection_image)
-
-    for component in reference_components:
-        nearest = min(
-            reference_detections,
-            key=lambda detection: np.hypot(
-                detection["cx"] - float(component["x"]),
-                detection["cy"] - float(component["y"]),
-            ),
-            default=None,
-        )
-        if nearest is None:
-            continue
-
-        distance = np.hypot(
-            nearest["cx"] - float(component["x"]),
-            nearest["cy"] - float(component["y"]),
-        )
-        if distance > 0.08 * max(reference_image.shape[:2]):
-            continue
-
-        component["box_width"] = max(1.0, nearest["x2"] - nearest["x1"])
-        component["box_height"] = max(1.0, nearest["y2"] - nearest["y1"])
+    return [
+        {
+            "id": i + 1,
+            "class_id": cls_ids[i],
+            "class": normalize_component_class(names[cls_ids[i]]),
+            "confidence": confs[i],
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "cx": cx[i], "cy": cy[i],
+        }
+        for i, (x1, y1, x2, y2) in enumerate(xyxy.tolist())
+    ]
 
 
 # ============================================================
-# 5. PHÁT HIỆN VÀ CẮT KHUNG PCB + YOLO
+# 5. PHÁT HIỆN VÀ CẮT KHUNG PCB
 # ============================================================
 
 def order_points(points):
-    """Sắp xếp bốn góc theo thứ tự trên-trái, trên-phải, dưới-phải, dưới-trái."""
+    """Sắp xếp bốn góc: trên-trái, trên-phải, dưới-phải, dưới-trái."""
     points = np.asarray(points, dtype=np.float32)
     center = points.mean(axis=0)
     angles = np.arctan2(points[:, 1] - center[1], points[:, 0] - center[0])
     ordered = points[np.argsort(angles)]
     start = np.argmin(ordered.sum(axis=1))
     return np.roll(ordered, -start, axis=0)
+
+
+_BOARD_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
 
 def find_board_corners(frame):
@@ -415,13 +299,8 @@ def find_board_corners(frame):
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    edges = cv2.morphologyEx(
-        edges, cv2.MORPH_CLOSE, kernel, iterations=2
-    )
-    contours, _ = cv2.findContours(
-        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, _BOARD_KERNEL, iterations=2)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     best_area = BOARD_CONTOUR_MIN_AREA
     best_corners = None
@@ -436,9 +315,7 @@ def find_board_corners(frame):
             continue
 
         corners = order_points(approx.reshape(4, 2))
-        edge_lengths = np.linalg.norm(
-            np.roll(corners, -1, axis=0) - corners, axis=1
-        )
+        edge_lengths = np.linalg.norm(np.roll(corners, -1, axis=0) - corners, axis=1)
         if edge_lengths.min() < 1:
             continue
 
@@ -469,35 +346,30 @@ def rectify_board(frame, corners):
         np.linalg.norm(top_left - bottom_left),
     ))
     if width < 1 or height < 1:
-        return None
+        return None, None
 
     destination = np.array([
-        [0, 0],
-        [width - 1, 0],
-        [width - 1, height - 1],
-        [0, height - 1],
+        [0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1],
     ], dtype=np.float32)
     transform = cv2.getPerspectiveTransform(corners, destination)
-    return cv2.warpPerspective(frame, transform, (width, height))
+    return cv2.warpPerspective(frame, transform, (width, height)), transform
+
+
+_ROI_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+_ROI_OPEN_KERNEL = np.ones((5, 5), dtype=np.uint8)
+_BLUE_LOW = np.array([85, 35, 20], dtype=np.uint8)
+_BLUE_HIGH = np.array([145, 255, 255], dtype=np.uint8)
 
 
 def find_board_roi(frame):
     """Tìm ROI PCB màu xanh để dùng dự phòng khi không tìm được bốn góc."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    blue_mask = cv2.inRange(
-        hsv,
-        np.array([85, 35, 20], dtype=np.uint8),
-        np.array([145, 255, 255], dtype=np.uint8),
-    )
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+    blue_mask = cv2.inRange(hsv, _BLUE_LOW, _BLUE_HIGH)
     blue_mask = cv2.morphologyEx(
-        blue_mask, cv2.MORPH_CLOSE, close_kernel, iterations=2
+        blue_mask, cv2.MORPH_CLOSE, _ROI_CLOSE_KERNEL, iterations=2
     )
     blue_mask = cv2.morphologyEx(
-        blue_mask,
-        cv2.MORPH_OPEN,
-        np.ones((5, 5), dtype=np.uint8),
-        iterations=1,
+        blue_mask, cv2.MORPH_OPEN, _ROI_OPEN_KERNEL, iterations=1
     )
     contours, _ = cv2.findContours(
         blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -520,127 +392,233 @@ def find_board_roi(frame):
     return x1, y1, x2, y2
 
 
-def detect_components(model, frame, origin=(0, 0)):
-    results = model.predict(
-        source=frame,
-        conf=CONF,
-        imgsz=IMGSZ,
-        device=DEVICE,
-        half=USE_CUDA,
-        max_det=MAX_DET,
-        agnostic_nms=True,
-        verbose=False,
+# ============================================================
+# 6. CĂN CHỈNH (ORB + AFFINE THEO LINH KIỆN)
+# ============================================================
+
+def is_valid_homography(H, ref_shape, frame_shape):
+    """Kiểm tra H có cho ra hình dạng PCB hợp lý trong khung hình không."""
+    rh, rw = ref_shape[:2]
+    fh, fw = frame_shape[:2]
+
+    if not np.all(np.isfinite(H)):
+        return False
+    if abs(np.linalg.det(H[:2, :2])) < 1e-6:
+        return False
+
+    try:
+        H_inv = np.linalg.inv(H)
+    except np.linalg.LinAlgError:
+        return False
+
+    corners = np.float32([[0, 0], [rw, 0], [rw, rh], [0, rh]]).reshape(-1, 1, 2)
+    quad = cv2.perspectiveTransform(corners, H_inv).reshape(-1, 2).astype(np.float32)
+
+    if not np.all(np.isfinite(quad)) or not cv2.isContourConvex(quad):
+        return False
+
+    area = cv2.contourArea(quad)
+    frame_area = float(fw * fh)
+    return MIN_BOARD_AREA_RATIO * frame_area < area < MAX_BOARD_AREA_RATIO * frame_area
+
+
+class OrbAligner:
+    """Giữ sẵn ORB + matcher của ảnh reference để dùng lại ở mỗi lần quét."""
+
+    def __init__(self, reference_image):
+        self.ref_shape = reference_image.shape
+        self.orb = cv2.ORB_create(nfeatures=ORB_FEATURES)
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+
+        gray = cv2.equalizeHist(cv2.cvtColor(reference_image, cv2.COLOR_BGR2GRAY))
+        self.ref_kp, self.ref_desc = self.orb.detectAndCompute(gray, None)
+
+        if self.ref_desc is None:
+            raise RuntimeError("Không tạo được ORB descriptor cho ảnh reference.")
+        if len(self.ref_kp) < MIN_GOOD_MATCHES:
+            raise RuntimeError(
+                f"Reference chỉ có {len(self.ref_kp)} keypoints. "
+                "Không đủ để căn chỉnh PCB."
+            )
+
+    def compute_homography(self, frame):
+        """Trả về H (khung hình -> ảnh gốc). None nếu không thấy PCB."""
+        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        frame_kp, frame_desc = self.orb.detectAndCompute(gray, None)
+
+        if frame_desc is None or frame_kp is None or len(frame_kp) < MIN_GOOD_MATCHES:
+            return None
+
+        try:
+            matches = self.matcher.knnMatch(frame_desc, self.ref_desc, k=2)
+        except cv2.error:
+            return None
+
+        good = [pair[0] for pair in matches
+                if len(pair) == 2 and pair[0].distance < RATIO_TEST * pair[1].distance]
+        if len(good) < MIN_GOOD_MATCHES:
+            return None
+
+        src_pts = np.float32([frame_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([self.ref_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+
+        H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, RANSAC_THRESHOLD)
+        if H is None or mask is None:
+            return None
+
+        inliers = int(mask.sum())
+        if inliers < MIN_INLIERS or inliers / len(good) < MIN_INLIER_RATIO:
+            return None
+
+        if not is_valid_homography(H, self.ref_shape, frame.shape):
+            return None
+        return H
+
+
+def estimate_component_alignment(reference_components, detections, tolerance):
+    """Căn chỉnh affine dựa trên các linh kiện chỉ xuất hiện đúng 1 lần mỗi loại."""
+    reference_by_class = {}
+    detections_by_class = {}
+
+    for component in reference_components:
+        reference_by_class.setdefault(
+            normalize_component_class(component["class"]), []).append(component)
+    for detection in detections:
+        if detection["confidence"] >= CONF:
+            detections_by_class.setdefault(
+                normalize_component_class(detection["class"]), []).append(detection)
+
+    source_points, reference_points = [], []
+    for class_name, reference_items in reference_by_class.items():
+        class_detections = detections_by_class.get(class_name, [])
+        if len(reference_items) != 1 or len(class_detections) != 1:
+            continue
+        source_points.append([class_detections[0]["cx"], class_detections[0]["cy"]])
+        reference_points.append(
+            [float(reference_items[0]["x"]), float(reference_items[0]["y"])])
+
+    if len(source_points) < 3:
+        return None
+
+    src = np.float32(source_points)
+    dst = np.float32(reference_points)
+    affine, inlier_mask = cv2.estimateAffine2D(
+        src, dst,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=tolerance,
+        maxIters=5000,
+        confidence=0.99,
+        refineIters=20,
     )
+    if affine is None or inlier_mask is None or int(inlier_mask.sum()) < 3:
+        return None
 
-    if not results:
-        return []
+    keep = inlier_mask.ravel() == 1
+    projected = cv2.transform(src[keep].reshape(-1, 1, 2), affine).reshape(-1, 2)
+    mean_error = float(np.linalg.norm(projected - dst[keep], axis=1).mean())
+    if mean_error > tolerance:
+        return None
 
-    result = results[0]
-    if result.boxes is None or len(result.boxes) == 0:
-        return []
+    homography = np.eye(3, dtype=np.float64)
+    homography[:2, :] = affine
+    return homography
 
-    boxes = result.boxes
-    detections = []
 
-    for idx in range(len(boxes)):
-        x1, y1, x2, y2 = boxes.xyxy[idx].detach().cpu().numpy().tolist()
-        x1 += origin[0]
-        x2 += origin[0]
-        y1 += origin[1]
-        y2 += origin[1]
-        cls_id = int(boxes.cls[idx].item())
-        detections.append({
-            "id": idx + 1,
-            "class_id": cls_id,
-            "class": normalize_component_class(model.names[cls_id]),
-            "confidence": float(boxes.conf[idx].item()),
-            "x1": float(x1), "y1": float(y1),
-            "x2": float(x2), "y2": float(y2),
-            "cx": float((x1 + x2) / 2.0),
-            "cy": float((y1 + y2) / 2.0),
-        })
+def attach_reference_box_sizes(reference_components, model, reference_image):
+    reference_detections = detect_components(model, adjust_contrast(reference_image))
+    if not reference_detections:
+        return
 
-    return detections
+    det_xy = np.array([[d["cx"], d["cy"]] for d in reference_detections])
+    det_wh = np.array([[d["x2"] - d["x1"], d["y2"] - d["y1"]]
+                       for d in reference_detections])
+    max_distance = 0.08 * max(reference_image.shape[:2])
+
+    for component in reference_components:
+        point = np.array([float(component["x"]), float(component["y"])])
+        distances = np.hypot(*(det_xy - point).T)
+        nearest = int(np.argmin(distances))
+        if distances[nearest] > max_distance:
+            continue
+        component["box_width"] = max(1.0, float(det_wh[nearest, 0]))
+        component["box_height"] = max(1.0, float(det_wh[nearest, 1]))
 
 
 # ============================================================
-# 6. GHÉP LINH KIỆN GỐC <-> CAMERA
+# 7. GHÉP LINH KIỆN GỐC <-> CAMERA
 # ============================================================
 
 def match_components(reference_components, detections, tolerance,
                      require_same_class=True):
-    candidates_by_reference = [[] for _ in reference_components]
-    for ref_index, ref in enumerate(reference_components):
-        for det_index, det in enumerate(detections):
-            if (require_same_class
-                    and normalize_component_class(det["class"])
-                    != normalize_component_class(ref["class"])):
-                continue
+    """Ghép tối đa (augmenting path), tính ma trận khoảng cách bằng numpy."""
+    num_ref, num_det = len(reference_components), len(detections)
+    if num_ref == 0 or num_det == 0:
+        return [], set(), set()
 
-            distance = float(np.hypot(det["ref_x"] - float(ref["x"]),
-                                      det["ref_y"] - float(ref["y"])))
-            bbox = det.get("ref_bbox")
-            contains_reference = (
-                bbox is not None
-                and bbox[0] <= float(ref["x"]) <= bbox[2]
-                and bbox[1] <= float(ref["y"]) <= bbox[3]
-            )
-            if contains_reference:
-                bbox_width = bbox[2] - bbox[0]
-                bbox_height = bbox[3] - bbox[1]
-                expected_width = ref.get("box_width")
-                expected_height = ref.get("box_height")
-                if (expected_width is not None and expected_height is not None
-                        and (bbox_width > 3.0 * expected_width
-                             or bbox_height > 3.0 * expected_height)):
-                    contains_reference = False
-            if distance <= tolerance or contains_reference:
-                candidates_by_reference[ref_index].append(
-                    (min(distance, tolerance if contains_reference else distance),
-                     det_index)
-                )
+    ref_xy = np.array([[float(c["x"]), float(c["y"])] for c in reference_components])
+    det_xy = np.array([[d["ref_x"], d["ref_y"]] for d in detections])
+    det_box = np.array([d["ref_bbox"] for d in detections])  # (D, 4)
 
-        candidates_by_reference[ref_index].sort()
+    # Ma trận khoảng cách (R, D)
+    dist = np.hypot(ref_xy[:, None, 0] - det_xy[None, :, 0],
+                    ref_xy[:, None, 1] - det_xy[None, :, 1])
 
-    # Augmenting paths avoid losing a valid match to an earlier greedy choice.
+    # Tâm linh kiện gốc nằm trong bbox đã ánh xạ
+    rx, ry = ref_xy[:, 0:1], ref_xy[:, 1:2]
+    contains = ((det_box[None, :, 0] <= rx) & (rx <= det_box[None, :, 2])
+                & (det_box[None, :, 1] <= ry) & (ry <= det_box[None, :, 3]))
+
+    # Loại bbox quá lớn so với kích thước kỳ vọng (NaN -> so sánh False -> giữ nguyên)
+    exp_w = np.array([c.get("box_width", np.nan) for c in reference_components],
+                     dtype=np.float64)[:, None]
+    exp_h = np.array([c.get("box_height", np.nan) for c in reference_components],
+                     dtype=np.float64)[:, None]
+    box_w = (det_box[:, 2] - det_box[:, 0])[None, :]
+    box_h = (det_box[:, 3] - det_box[:, 1])[None, :]
+    too_big = (box_w > 3.0 * exp_w) | (box_h > 3.0 * exp_h)
+    contains &= ~too_big
+
+    allowed = (dist <= tolerance) | contains
+    if require_same_class:
+        ref_cls = np.array([normalize_component_class(c["class"])
+                            for c in reference_components])
+        det_cls = np.array([normalize_component_class(d["class"]) for d in detections])
+        allowed &= ref_cls[:, None] == det_cls[None, :]
+
+    cost = np.where(contains, np.minimum(dist, tolerance), dist)
+
+    candidates = []
+    for r in range(num_ref):
+        idx = np.flatnonzero(allowed[r])
+        candidates.append(idx[np.argsort(cost[r, idx], kind="stable")].tolist())
+
     detection_to_reference = {}
 
-    def assign(reference_index, visited_detections):
-        for distance, det_index in candidates_by_reference[reference_index]:
-            if det_index in visited_detections:
+    def assign(reference_index, visited):
+        for det_index in candidates[reference_index]:
+            if det_index in visited:
                 continue
-            visited_detections.add(det_index)
-
-            previous_reference = detection_to_reference.get(det_index)
-            if (previous_reference is None
-                    or assign(previous_reference, visited_detections)):
+            visited.add(det_index)
+            previous = detection_to_reference.get(det_index)
+            if previous is None or assign(previous, visited):
                 detection_to_reference[det_index] = reference_index
                 return True
         return False
 
-    reference_order = sorted(
-        range(len(reference_components)),
-        key=lambda index: (len(candidates_by_reference[index]), index),
-    )
-    for ref_index in reference_order:
+    for ref_index in sorted(range(num_ref), key=lambda i: (len(candidates[i]), i)):
         assign(ref_index, set())
 
-    matches = []
-    for det_index, ref_index in detection_to_reference.items():
-        distance = next(
-            distance for distance, candidate_index
-            in candidates_by_reference[ref_index]
-            if candidate_index == det_index
-        )
-        matches.append({"det_index": det_index, "ref_index": ref_index,
-                        "distance": distance})
-    matches.sort(key=lambda match: match["ref_index"])
-
+    matches = [
+        {"det_index": det_index, "ref_index": ref_index,
+         "distance": float(cost[ref_index, det_index])}
+        for det_index, ref_index in detection_to_reference.items()
+    ]
+    matches.sort(key=lambda m: m["ref_index"])
     return matches, set(detection_to_reference), set(detection_to_reference.values())
 
 
 # ============================================================
-# 7. ĐÁNH GIÁ MẠCH
+# 8. ĐÁNH GIÁ MẠCH
 # ============================================================
 
 def evaluate_board_status(reference_components, detections, matches,
@@ -654,128 +632,113 @@ def evaluate_board_status(reference_components, detections, matches,
     }
 
     if aligned:
-        matched_detections = {match["det_index"] for match in matches}
+        matched_detections = {m["det_index"] for m in matches}
         stats["missing"] = len(reference_components) - len(used_references)
         stats["missing_components"] = [
-            component["class"]
-            for index, component in enumerate(reference_components)
-            if index not in used_references
+            c["class"] for i, c in enumerate(reference_components)
+            if i not in used_references
         ]
         stats["extra_components"] = [
-            detection["class"]
-            for index, detection in enumerate(detections)
-            if index not in matched_detections
-            and detection["confidence"] >= EXTRA_MIN_CONF
+            d["class"] for i, d in enumerate(detections)
+            if i not in matched_detections and d["confidence"] >= EXTRA_MIN_CONF
         ]
         stats["extra"] = len(stats["extra_components"])
-        if (stats["missing"] > MISSING_ALLOWED
-                or stats["extra"] > EXTRA_ALLOWED):
+        if stats["missing"] > MISSING_ALLOWED or stats["extra"] > EXTRA_ALLOWED:
             return STATUS_FAULTY, stats
         return STATUS_OK, stats
 
+    # Không căn chỉnh được: chỉ đếm theo lớp để báo cáo. Số lượng đúng vẫn
+    # không chứng minh linh kiện nằm đúng vị trí nên luôn trả về FAULTY.
     reference_counts = Counter(
-        normalize_component_class(component["class"])
-        for component in reference_components
+        normalize_component_class(c["class"]) for c in reference_components
     )
     detection_confidences = {}
-    for detection in detections:
-        if detection["confidence"] >= CONF:
-            class_name = normalize_component_class(detection["class"])
-            detection_confidences.setdefault(class_name, []).append(
-                detection["confidence"]
-            )
+    for d in detections:
+        if d["confidence"] >= CONF:
+            detection_confidences.setdefault(
+                normalize_component_class(d["class"]), []).append(d["confidence"])
 
-    class_names = set(reference_counts) | set(detection_confidences)
-    for class_name in class_names:
-        confidences = sorted(
-            detection_confidences.get(class_name, []), reverse=True
-        )
-        expected_count = reference_counts[class_name]
-        stats["missing"] += max(expected_count - len(confidences), 0)
-        stats["extra"] += sum(
-            confidence >= EXTRA_MIN_CONF
-            for confidence in confidences[expected_count:]
-        )
+    for class_name in set(reference_counts) | set(detection_confidences):
+        confidences = sorted(detection_confidences.get(class_name, []), reverse=True)
+        expected = reference_counts[class_name]
+        stats["missing"] += max(expected - len(confidences), 0)
+        stats["extra"] += sum(c >= EXTRA_MIN_CONF for c in confidences[expected:])
+
     stats["matched"] = len(reference_components) - stats["missing"]
     stats["missing_components"] = ["count mismatch"] * stats["missing"]
     stats["extra_components"] = ["count mismatch"] * stats["extra"]
-
-    if (stats["missing"] > MISSING_ALLOWED
-            or stats["extra"] > EXTRA_ALLOWED):
-        return STATUS_FAULTY, stats
-
-    # Without geometric alignment, class counts cannot prove components are
-    # installed at the reference locations.
     return STATUS_FAULTY, stats
 
 
 # ============================================================
-# 7. VẼ KẾT QUẢ
+# 9. VẼ KẾT QUẢ
 # ============================================================
 
 def draw_results(frame, detections, reference_components, matches,
-                 used_references, aligned, H, status, stats):
+                 used_references, aligned, H, status, stats, show_header=True):
     output = frame.copy()
-    matched_detections = {match["det_index"] for match in matches}
+    matched_detections = {m["det_index"] for m in matches}
 
     for det_index, det in enumerate(detections):
         x1, y1, x2, y2 = int(det["x1"]), int(det["y1"]), int(det["x2"]), int(det["y2"])
 
         if aligned and det_index in matched_detections:
-            color = (0, 255, 0)
-            label = f'{det["class"]} {det["confidence"]:.2f} OK'
+            color, tag = (0, 255, 0), "OK"
         elif det["confidence"] >= EXTRA_MIN_CONF:
-            color = (0, 0, 255)
-            label = f'{det["class"]} {det["confidence"]:.2f} EXTRA'
+            color, tag = (0, 0, 255), "EXTRA"
         else:
-            color = (0, 165, 255)
-            label = f'{det["class"]} {det["confidence"]:.2f} LOW'
+            color, tag = (0, 165, 255), "LOW"
 
         cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(output, label, (x1, max(y1 - 8, 18)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 2, cv2.LINE_AA)
+        cv2.putText(output, f'{det["class"]} {det["confidence"]:.2f} {tag}',
+                    (x1, max(y1 - 8, 18)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48, color, 2, cv2.LINE_AA)
 
     if aligned and H is not None and stats["missing"] > 0:
+        missing_idx = [i for i in range(len(reference_components))
+                       if i not in used_references]
         try:
             H_inverse = np.linalg.inv(H)
-
-            for ref_index, ref in enumerate(reference_components):
-                if ref_index in used_references:
-                    continue
-
-                point = np.array([[[float(ref["x"]), float(ref["y"])]]],
-                                 dtype=np.float32)
-                px, py = cv2.perspectiveTransform(point, H_inverse)[0, 0]
+            pts = np.float32([[float(reference_components[i]["x"]),
+                               float(reference_components[i]["y"])]
+                              for i in missing_idx]).reshape(-1, 1, 2)
+            projected = cv2.perspectiveTransform(pts, H_inverse).reshape(-1, 2)
+            h, w = output.shape[:2]
+            for i, (px, py) in zip(missing_idx, projected):
                 px, py = int(px), int(py)
-
-                if px < 0 or px >= output.shape[1] or py < 0 or py >= output.shape[0]:
+                if not (0 <= px < w and 0 <= py < h):
                     continue
-
                 color = (255, 0, 255)
                 cv2.circle(output, (px, py), 10, color, 2)
-                cv2.putText(output, f'MISSING {ref["class"]}', (px + 12, py),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2, cv2.LINE_AA)
+                cv2.putText(output, f'MISSING {reference_components[i]["class"]}',
+                            (px + 12, py), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45, color, 2, cv2.LINE_AA)
         except np.linalg.LinAlgError:
             pass
 
+    if show_header:
+        draw_header(output, status, stats, aligned)
+    return output
+
+
+def draw_header(output, status, stats, aligned):
     cv2.rectangle(output, (0, 0), (520, 80), (25, 25, 25), -1)
     cv2.putText(output, STATUS_TEXT_IMAGE[status], (10, 38),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, STATUS_COLOR[status], 3, cv2.LINE_AA)
-    if aligned:
-        info = (f'Position check: Matched: {stats["matched"]}  '
-                f'Missing: {stats["missing"]}  Extra: {stats["extra"]}')
-    else:
-        info = (f'Alignment unavailable; count check: Matched: {stats["matched"]}  '
-                f'Missing: {stats["missing"]}  Extra: {stats["extra"]}')
+    prefix = "Position check" if aligned else "Alignment unavailable; count check"
+    info = (f'{prefix}: Matched: {stats["matched"]}  '
+            f'Missing: {stats["missing"]}  Extra: {stats["extra"]}')
     cv2.putText(output, info, (10, 68), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
     details = []
     if stats["missing_components"]:
         details.append(f'Missing: {", ".join(stats["missing_components"])}')
     if stats["extra_components"]:
         details.append(f'Extra: {", ".join(stats["extra_components"])}')
     if details:
-        cv2.rectangle(output, (0, 80), (min(output.shape[1], 900), 112), (25, 25, 25), -1)
+        cv2.rectangle(output, (0, 80), (min(output.shape[1], 900), 112),
+                      (25, 25, 25), -1)
         cv2.putText(output, " | ".join(details), (10, 104),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
 
@@ -796,118 +759,144 @@ def resize_for_display(image):
     if scale >= 1.0:
         return image
     return cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))),
-                      interpolation=cv2.INTER_LINEAR)
+                      interpolation=cv2.INTER_AREA)
 
 
 # ============================================================
-# 8. MỘT LẦN QUÉT
+# 10. MỘT LẦN QUÉT
 # ============================================================
 
-def scan_board(frame, model, reference_components, ref_shape, orb, ref_kp, ref_desc):
-    # Cắt và nắn thẳng PCB trước khi nhận diện linh kiện.
-    corners = find_board_corners(frame)
-    rectified = rectify_board(frame, corners) if corners is not None else None
+class PCBChecker:
+    def __init__(self, model, reference_components, reference_image):
+        self.model = model
+        self.reference_components = reference_components
+        ref_h, ref_w = reference_image.shape[:2]
+        self.tolerance = MATCH_TOLERANCE_RATIO * max(ref_w, ref_h)
 
-    if rectified is not None:
-        board_crop = rectified
-    else:
+        attach_reference_box_sizes(reference_components, model, reference_image)
+        self.aligner = OrbAligner(reference_image) if USE_ORB_ALIGNMENT else None
+
+    def _crop_board(self, frame):
+        corners = find_board_corners(frame)
+        rectified, transform = (rectify_board(frame, corners)
+                                if corners is not None else (None, None))
+        if rectified is not None:
+            return rectified, transform
+
         roi = find_board_roi(frame)
         if roi is None:
             raise RuntimeError("Không tìm thấy PCB trong ảnh vừa chụp; bỏ qua lần quét.")
-        roi_x1, roi_y1, roi_x2, roi_y2 = roi
-        board_crop = frame[roi_y1:roi_y2, roi_x1:roi_x2]
+        x1, y1, x2, y2 = roi
+        translation = np.array([[1, 0, -x1], [0, 1, -y1], [0, 0, 1]], dtype=np.float64)
+        return frame[y1:y2, x1:x2], translation
 
-    detection_frame = cv2.convertScaleAbs(
-        board_crop, alpha=CONTRAST_ALPHA, beta=CONTRAST_BETA
-    )
-    detections = detect_components(model, detection_frame)
+    @staticmethod
+    def _paste_on_frame(frame, annotated, board_transform):
+        """Ghép ảnh PCB đã vẽ kết quả trở lại đúng vị trí trên khung hình gốc."""
+        h, w = frame.shape[:2]
+        inverse = np.linalg.inv(board_transform)
+        warped = cv2.warpPerspective(annotated, inverse, (w, h))
+        mask = cv2.warpPerspective(
+            np.full(annotated.shape[:2], 255, dtype=np.uint8), inverse, (w, h)
+        ) > 127
+        output = frame.copy()
+        output[mask] = warped[mask]
+        return output
 
-    ref_h, ref_w = ref_shape[:2]
-    tolerance = MATCH_TOLERANCE_RATIO * max(ref_w, ref_h)
+    @staticmethod
+    def _map_detections(detections, H):
+        """Ánh xạ tâm và bbox của toàn bộ detection sang toạ độ reference (1 lần gọi)."""
+        if not detections:
+            return []
 
-    H = estimate_component_alignment(reference_components, detections, tolerance)
-    if H is None and USE_ORB_ALIGNMENT:
-        alignment_frame = cv2.convertScaleAbs(
-            board_crop, alpha=CONTRAST_ALPHA, beta=CONTRAST_BETA
-        )
-        H = compute_homography(
-            ref_kp, ref_desc, ref_shape, alignment_frame, orb
-        )
+        centers = np.float32([[d["cx"], d["cy"]] for d in detections]).reshape(-1, 1, 2)
+        ref_centers = cv2.perspectiveTransform(centers, H).reshape(-1, 2)
 
-    aligned = H is not None
+        box_corners = np.float32([
+            [[d["x1"], d["y1"]], [d["x2"], d["y1"]],
+             [d["x2"], d["y2"]], [d["x1"], d["y2"]]]
+            for d in detections
+        ]).reshape(-1, 1, 2)
+        mapped = cv2.perspectiveTransform(box_corners, H).reshape(-1, 4, 2)
+        mins, maxs = mapped.min(axis=1), mapped.max(axis=1)
 
-    transformed = []
-    if aligned:
-        for det in detections:
-            rx, ry = transform_point_to_reference(det["cx"], det["cy"], H)
+        transformed = []
+        for i, det in enumerate(detections):
             d = det.copy()
-            d["ref_x"], d["ref_y"] = rx, ry
-            bbox_corners = np.float32([[
-                [det["x1"], det["y1"]],
-                [det["x2"], det["y1"]],
-                [det["x2"], det["y2"]],
-                [det["x1"], det["y2"]],
-            ]])
-            mapped_corners = cv2.perspectiveTransform(
-                bbox_corners, H
-            ).reshape(-1, 2)
-            d["ref_bbox"] = (
-                float(mapped_corners[:, 0].min()),
-                float(mapped_corners[:, 1].min()),
-                float(mapped_corners[:, 0].max()),
-                float(mapped_corners[:, 1].max()),
-            )
+            d["ref_x"], d["ref_y"] = float(ref_centers[i, 0]), float(ref_centers[i, 1])
+            d["ref_bbox"] = (float(mins[i, 0]), float(mins[i, 1]),
+                             float(maxs[i, 0]), float(maxs[i, 1]))
             transformed.append(d)
+        return transformed
 
-        matches, _, used_references = match_components(
-            reference_components, transformed, tolerance,
-            require_same_class=False,
+    def scan(self, frame):
+        board_crop, board_transform = self._crop_board(frame)
+        detection_frame = adjust_contrast(board_crop)  # dùng chung cho YOLO và ORB
+        detections = detect_components(self.model, detection_frame)
+
+        H = estimate_component_alignment(
+            self.reference_components, detections, self.tolerance)
+        if H is None and self.aligner is not None:
+            H = self.aligner.compute_homography(detection_frame)
+        aligned = H is not None
+
+        if aligned:
+            shown = self._map_detections(detections, H)
+            matches, _, used_references = match_components(
+                self.reference_components, shown, self.tolerance,
+                require_same_class=False,
+            )
+        else:
+            shown, matches, used_references = detections, [], set()
+
+        status, stats = evaluate_board_status(
+            self.reference_components, shown, matches, used_references, aligned)
+
+        annotated = draw_results(
+            board_crop, shown, self.reference_components, matches,
+            used_references, aligned, H, status, stats,
+            show_header=not SHOW_FULL_FRAME_RESULT,
         )
-    else:
-        matches, used_references = [], set()
-
-    shown_detections = transformed if aligned else detections
-
-    status, stats = evaluate_board_status(
-        reference_components, shown_detections, matches, used_references, aligned
-    )
-
-    annotated = draw_results(
-        board_crop, shown_detections, reference_components, matches,
-        used_references, aligned, H, status, stats,
-    )
-
-    return {"status": status, "annotated": annotated, "stats": stats}
+        if SHOW_FULL_FRAME_RESULT:
+            annotated = self._paste_on_frame(frame, annotated, board_transform)
+            draw_header(annotated, status, stats, aligned)
+        return {"status": status, "annotated": annotated, "stats": stats}
 
 
 # ============================================================
-# 9. QUÉT Ở LUỒNG NỀN
+# 11. QUÉT Ở LUỒNG NỀN
 # ============================================================
 
 class Scanner:
-    def __init__(self, model, reference_components, ref_shape, orb, ref_kp, ref_desc):
-        self.args = (model, reference_components, ref_shape, orb, ref_kp, ref_desc)
+    def __init__(self, checker):
+        self.checker = checker
+        self.lock = threading.Lock()
         self.busy = False
         self.result = None
 
     def start(self, frame):
-        if self.busy:
-            return False
-        self.busy = True
-        threading.Thread(target=self._run, args=(frame.copy(),), daemon=True).start()
+        with self.lock:
+            if self.busy:
+                return False
+            self.busy = True
+        # Frame không bị ghi đè (mỗi lần read là mảng mới) nên không cần copy.
+        threading.Thread(target=self._run, args=(frame,), daemon=True).start()
         return True
 
     def _run(self, frame):
+        result = None
         try:
-            self.result = scan_board(frame, *self.args)
+            result = self.checker.scan(frame)
         except Exception as e:
             print(f"[ERROR] {e}", flush=True)
         finally:
-            self.busy = False
+            with self.lock:
+                self.result = result
+                self.busy = False
 
     def pop_result(self):
-        result = self.result
-        self.result = None
+        with self.lock:
+            result, self.result = self.result, None
         return result
 
 
@@ -920,32 +909,21 @@ def stable_status(history):
 
 
 # ============================================================
-# 10. MAIN
+# 12. MAIN
 # ============================================================
 
 def main():
     os.system("")  # bật màu ANSI trên Windows terminal
 
     reference_components = load_reference()["components"]
-    reference_counts = Counter(
-        component["class"] for component in reference_components
-    )
-    print(
-        "[INFO] PCB checker v4 - checks detected component positions against reference.",
-        flush=True,
-    )
+    reference_counts = Counter(c["class"] for c in reference_components)
+    print("[INFO] PCB checker v5 - checks detected component positions against reference.",
+          flush=True)
     print(f"[INFO] Linh kiện mạch gốc: {dict(reference_counts)}", flush=True)
-    reference_image = load_reference_image()
-    ref_shape = reference_image.shape
-    model = YOLO(find_model())
-    attach_reference_box_sizes(
-        reference_components, model, reference_image
-    )
 
-    if USE_ORB_ALIGNMENT:
-        orb, ref_kp, ref_desc = build_reference_orb(reference_image)
-    else:
-        orb = ref_kp = ref_desc = None
+    reference_image = load_reference_image()
+    model = YOLO(find_model())
+    checker = PCBChecker(model, reference_components, reference_image)
 
     # Chạy thử YOLO 1 lần để lần quét đầu không bị khựng.
     model.predict(
@@ -977,8 +955,7 @@ def main():
             "điện thoại với máy tính cùng mạng."
         )
 
-    scanner = Scanner(model, reference_components, ref_shape, orb, ref_kp, ref_desc)
-
+    scanner = Scanner(checker)
     history = deque(maxlen=max(1, SMOOTHING_WINDOW))
     last_status = None
     last_shown_id = -1
@@ -997,12 +974,11 @@ def main():
             if result is not None:
                 history.append(result["status"])
                 last_status = stable_status(history)
-                annotated = draw_status_overlay(result["annotated"], last_status)
-
                 print(f"{ANSI[last_status]}{STATUS_TEXT_TERMINAL[last_status]}{ANSI_RESET}",
                       flush=True)
 
                 if SHOW_RESULT_WINDOW:
+                    annotated = draw_status_overlay(result["annotated"], last_status)
                     cv2.imshow(WINDOW_RESULT, resize_for_display(annotated))
 
             # ---------- VIDEO TRỰC TIẾP ----------
@@ -1014,15 +990,13 @@ def main():
                     live = frame.copy()
 
                 cv2.rectangle(live, (0, 0), (live.shape[1], 58), (25, 25, 25), -1)
-
                 if last_status is not None:
-                    cv2.putText(live, f"Last: {STATUS_TEXT_IMAGE[last_status]}", (10, 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    cv2.putText(live, f"Last: {STATUS_TEXT_IMAGE[last_status]}",
+                                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                 STATUS_COLOR[last_status], 2, cv2.LINE_AA)
-
-                cv2.putText(live, "s: Chup va nhan dien | q: Thoat",
-                            (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                            (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(live, "s: Chup va nhan dien | q: Thoat", (10, 52),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+                            cv2.LINE_AA)
 
                 cv2.imshow(WINDOW_LIVE, live)
                 key = cv2.waitKey(1) & 0xFF

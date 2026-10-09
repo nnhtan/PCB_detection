@@ -49,7 +49,6 @@ DEVICE = 0 if USE_CUDA else "cpu"
 # ---- So sánh vị trí ----
 MATCH_TOLERANCE_RATIO = 0.045
 MISSING_ALLOWED = 0
-EXTRA_ALLOWED = 2
 EXTRA_MIN_CONF = 0.50
 
 # ---- ORB ----
@@ -643,7 +642,7 @@ def evaluate_board_status(reference_components, detections, matches,
             if i not in matched_detections and d["confidence"] >= EXTRA_MIN_CONF
         ]
         stats["extra"] = len(stats["extra_components"])
-        if stats["missing"] > MISSING_ALLOWED or stats["extra"] > EXTRA_ALLOWED:
+        if stats["missing"] > MISSING_ALLOWED:
             return STATUS_FAULTY, stats
         return STATUS_OK, stats
 

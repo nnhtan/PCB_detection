@@ -1,7 +1,12 @@
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
-from backend.app.api.v1.common import get_pipeline, image_to_data_uri, read_upload
+from backend.app.api.v1.common import (
+    get_pipeline,
+    image_to_data_uri,
+    read_upload,
+    run_pipeline_operation,
+)
 from backend.app.services.pcb_engine import DEFAULT_CONF, DEFAULT_IMGSZ
 
 router = APIRouter()
@@ -17,7 +22,12 @@ async def detect_components(
     frame, filename = await read_upload(image)
     try:
         result = await run_in_threadpool(
-            get_pipeline(request).run_detection_only, frame, conf, imgsz
+            run_pipeline_operation,
+            get_pipeline(request),
+            get_pipeline(request).run_detection_only,
+            frame,
+            conf,
+            imgsz,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

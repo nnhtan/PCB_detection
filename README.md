@@ -17,7 +17,7 @@
 
 ## Chức năng
 
-- **Mạch tham chiếu:** tải ảnh PCB đạt chuẩn, chạy YOLO để tạo danh sách linh kiện và tọa độ chuẩn.
+- **Danh mục mạch tham chiếu:** lưu nhiều ảnh PCB chuẩn với tên riêng, chọn lại mạch cần dùng bất cứ lúc nào; lựa chọn hiện tại được giữ sau khi backend khởi động lại.
 - **Kiểm tra PCB:** tải ảnh PCB cần kiểm tra riêng, căn chỉnh với mạch chuẩn, so sánh vị trí và phân loại linh kiện thiếu/thừa.
 - **Nhận diện YOLO:** phát hiện và thống kê linh kiện trong ảnh độc lập, không yêu cầu reference.
 - **Camera trực tiếp:** kết nối webcam hoặc camera IP, xem MJPEG, quét từng frame hoặc đặt quét tự động mỗi 3, 5, hoặc 10 giây.
@@ -143,10 +143,13 @@ Chọn terminal của từng dịch vụ rồi nhấn **Ctrl + C**.
 ### Nạp mạch chuẩn
 
 1. Mở mục **Mạch tham chiếu**.
-2. Chọn ảnh PCB mẫu đạt chuẩn, rõ nét và thấy toàn bộ bo mạch.
+2. Chọn ảnh PCB mẫu đạt chuẩn, rõ nét và thấy toàn bộ bo mạch; nhập tên dễ nhận biết, ví dụ `PCB nguồn phiên bản A`.
 3. Điều chỉnh ngưỡng tin cậy YOLO nếu cần.
-4. Chọn **Lưu mạch chuẩn** và chờ hệ thống nhận diện.
-5. Kiểm tra ảnh YOLO đánh dấu và danh sách linh kiện. Reference rỗng sẽ không được lưu.
+4. Chọn **Lưu mạch chuẩn** và chờ hệ thống nhận diện. Mạch mới được thêm vào danh mục và tự động chọn làm mạch đang dùng.
+5. Để chuyển sang một mạch đã lưu, chọn **Chọn mạch** ở dòng tương ứng. Mạch đang hoạt động được đánh dấu **Đang dùng**.
+6. Kiểm tra ảnh YOLO đánh dấu và danh sách linh kiện. Ảnh không nhận diện được linh kiện sẽ không được lưu.
+
+Mỗi mạch chuẩn được lưu riêng trong `backend\storage\references\<id>\`. Danh sách và mạch đang chọn được ghi trong `backend\storage\reference_catalog.json`. Mạch chuẩn cũ sẵn có được tự động đưa vào danh mục lần đầu backend khởi động với tên lấy từ dữ liệu reference ban đầu.
 
 ### Kiểm tra ảnh PCB
 
@@ -179,6 +182,7 @@ Các endpoint có tại `/api/...`. Alias tương thích cũng được cung c�
 | `GET` | `/api/info` | Model, thiết bị, lớp YOLO, reference và tham số mặc định |
 | `GET` | `/api/reference` | Reference map cùng ảnh PCB chuẩn và ảnh đã đánh dấu |
 | `POST` | `/api/reference/update` | Tạo/lưu reference từ ảnh upload |
+| `POST` | `/api/reference/select` | Kích hoạt một mạch đã lưu (`reference_id`) |
 | `GET` | `/api/sample` | Trả ảnh mẫu dưới dạng data URI |
 | `POST` | `/api/detect` | YOLO detection độc lập |
 | `POST` | `/api/inspect` | Detection, căn chỉnh và QA theo reference |
@@ -196,7 +200,8 @@ Swagger UI: `http://127.0.0.1:8000/docs`. ReDoc: `http://127.0.0.1:8000/redoc`.
 Các endpoint upload ảnh nhận `multipart/form-data`, trường file bắt buộc tên là `image`. Giới hạn upload là 32 MB.
 
 - `/api/detect`: `image`, `conf`, `imgsz`.
-- `/api/reference/update`: `image`, `conf`, `imgsz`.
+- `/api/reference/update`: `image`, `name` (tùy chọn), `conf`, `imgsz`. Nếu bỏ `name`, tên file upload được dùng.
+- `/api/reference/select`: `reference_id` (ID lấy từ danh sách `catalog` của `/api/reference`).
 - `/api/inspect`: `image`, `conf`, `imgsz`, `tolerance_ratio`, `extra_allowed`, `missing_allowed`, `auto_crop`.
 - `/api/camera/connect`: `source`.
 - `/api/camera/scan`: `conf`, `imgsz`, `tolerance_ratio`.
@@ -219,8 +224,8 @@ Backend đọc các biến môi trường sau khi khởi động:
 | Biến | Giá trị mặc định | Mục đích |
 |---|---|---|
 | `PCB_MODEL_PATH` | `backend\models\best.pt`; nếu không có thì dùng `best.pt` ở repo root | File trọng số YOLO |
-| `PCB_REFERENCE_PATH` | `backend\storage\reference_components.json` | JSON tọa độ reference |
-| `PCB_REFERENCE_IMAGE_PATH` | `backend\storage\reference.jpg` | Ảnh reference được lưu khi cập nhật |
+| `PCB_REFERENCE_PATH` | `backend\storage\reference_components.json` | JSON reference ban đầu dùng khi khởi tạo danh mục lần đầu |
+| `PCB_REFERENCE_IMAGE_PATH` | `backend\storage\reference.jpg` | Ảnh reference ban đầu dùng khi khởi tạo danh mục lần đầu |
 | `PCB_SAMPLE_IMAGE_PATH` | `backend\storage\sample.jpg`; nếu không có thì dùng `2.jpg` ở repo root | Ảnh mẫu của API |
 | `PCB_CAMERA_SOURCE` | `0` | Webcam index hoặc URL camera mặc định cho API |
 
@@ -238,7 +243,7 @@ $env:PCB_MODEL_PATH = "D:\models\pcb-best.pt"
 uvicorn backend.main:app --reload
 ```
 
-Ảnh reference và file JSON được tạo/cập nhật trong `backend\storage` theo các đường dẫn cấu hình. Không xóa model hoặc reference cần thiết khi thay đổi cấu hình.
+Mỗi reference được tạo trên giao diện có thư mục ảnh/JSON riêng dưới `backend\storage\references`. Các biến `PCB_REFERENCE_PATH` và `PCB_REFERENCE_IMAGE_PATH` chỉ định dữ liệu reference ban đầu để nhập vào danh mục nếu danh mục chưa tồn tại. Không xóa `reference_catalog.json` hoặc thư mục `references` nếu muốn giữ danh mục mạch đã lưu.
 
 ## Kiểm tra API
 

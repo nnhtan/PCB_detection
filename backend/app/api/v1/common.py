@@ -14,6 +14,15 @@ def get_camera(request: Request) -> Any:
     return request.app.state.camera
 
 
+def get_reference_catalog(request: Request) -> Any:
+    return request.app.state.references
+
+
+def run_pipeline_operation(pipeline: Any, operation: Any, *args: Any, **kwargs: Any) -> Any:
+    with pipeline.operation_lock:
+        return operation(*args, **kwargs)
+
+
 async def read_upload(image: UploadFile) -> tuple[np.ndarray, str]:
     contents = await image.read(32 * 1024 * 1024 + 1)
     if len(contents) > 32 * 1024 * 1024:
@@ -74,17 +83,18 @@ def run_inspection(pipeline: Any, frame: np.ndarray, values: Any) -> dict[str, A
             detail="Chưa có mạch tham chiếu. Hãy tải ảnh mạch chuẩn trước khi kiểm tra.",
         )
     try:
-        return pipeline.inspect_pcb(
-            frame=frame,
-            conf=float(values.get("conf", DEFAULT_CONF)),
-            imgsz=int(values.get("imgsz", DEFAULT_IMGSZ)),
-            tolerance_ratio=float(
-                values.get("tolerance_ratio", DEFAULT_TOLERANCE_RATIO)
-            ),
-            extra_allowed=int(values.get("extra_allowed", DEFAULT_EXTRA_ALLOWED)),
-            missing_allowed=int(values.get("missing_allowed", DEFAULT_MISSING_ALLOWED)),
-            auto_crop=parse_bool(values.get("auto_crop", True)),
-        )
+        with pipeline.operation_lock:
+            return pipeline.inspect_pcb(
+                frame=frame,
+                conf=float(values.get("conf", DEFAULT_CONF)),
+                imgsz=int(values.get("imgsz", DEFAULT_IMGSZ)),
+                tolerance_ratio=float(
+                    values.get("tolerance_ratio", DEFAULT_TOLERANCE_RATIO)
+                ),
+                extra_allowed=int(values.get("extra_allowed", DEFAULT_EXTRA_ALLOWED)),
+                missing_allowed=int(values.get("missing_allowed", DEFAULT_MISSING_ALLOWED)),
+                auto_crop=parse_bool(values.get("auto_crop", True)),
+            )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

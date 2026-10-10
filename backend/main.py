@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import RLock
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from backend.app.api.api import api_router
 from backend.app.core import config
 from backend.app.services.camera_stream import CameraManager
 from backend.app.services.pcb_engine import PCBPipeline
+from backend.app.services.reference_catalog import ReferenceCatalog
 
 
 @asynccontextmanager
@@ -20,6 +22,13 @@ async def lifespan(application: FastAPI):
         model_path=str(config.MODEL_PATH),
         ref_json_path=str(config.REFERENCE_PATH),
         ref_image_path=str(config.REFERENCE_IMAGE_PATH),
+    )
+    application.state.pipeline.operation_lock = RLock()
+    application.state.references = ReferenceCatalog(
+        pipeline=application.state.pipeline,
+        storage_dir=config.BACKEND_DIR / "storage",
+        operation_lock=application.state.pipeline.operation_lock,
+        legacy_detected_path=config.REFERENCE_DETECTED_PATH,
     )
     application.state.camera = CameraManager(config.CAMERA_SOURCE)
     yield

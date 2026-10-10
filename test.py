@@ -18,10 +18,19 @@ sys.setrecursionlimit(5000)  # ghép linh kiện dùng đệ quy (augmenting pat
 # 1. CẤU HÌNH
 # ============================================================
 
-MODEL_CANDIDATES = ["best.pt"]
+PROJECT_DIR = Path(__file__).resolve().parent
+BACKEND_STORAGE = PROJECT_DIR / "backend" / "storage"
+MODEL_CANDIDATES = [
+    str(PROJECT_DIR / "backend" / "models" / "best.pt"),
+    str(PROJECT_DIR / "best.pt"),
+]
 
-REFERENCE_JSON = "reference_components.json"
-REFERENCE_IMAGE = "2.jpg"
+REFERENCE_JSON = str(BACKEND_STORAGE / "reference_components.json")
+REFERENCE_IMAGE = str(
+    (BACKEND_STORAGE / "reference.jpg")
+    if (BACKEND_STORAGE / "reference.jpg").is_file()
+    else (PROJECT_DIR / "2.jpg")
+)
 
 # Camera điện thoại Android IP Webcam (hoặc SOURCE = 0 cho webcam máy tính)
 SOURCE_VALUE = os.environ.get(
@@ -78,22 +87,39 @@ SHOW_FULL_FRAME_RESULT = False  # True: kết quả vẽ trên toàn khung hình
 # ---- Trạng thái ----
 STATUS_FAULTY = "FAULTY"
 STATUS_OK = "OK"
+STATUS_UNALIGNED = "UNALIGNED"
 
 STATUS_TEXT_TERMINAL = {
     STATUS_FAULTY: "MẠCH BỊ LỖI",
     STATUS_OK: "MẠCH ĐẠT CHUẨN",
+    STATUS_UNALIGNED: "ĐÃ QUÉT - CHƯA ĐỐI CHIẾU",
 }
 STATUS_TEXT_IMAGE = {
     STATUS_FAULTY: "PCB FAULTY",
     STATUS_OK: "PCB OK",
+    STATUS_UNALIGNED: "PCB SCANNED",
 }
-STATUS_COLOR = {  # BGR
-    STATUS_FAULTY: (0, 0, 255),
-    STATUS_OK: (0, 255, 0),
+UI_COLORS = {  # BGR
+    "background": (23, 15, 11),
+    "panel": (39, 24, 17),
+    "border": (55, 41, 31),
+    "primary": (246, 130, 59),
+    "pass": (129, 185, 16),
+    "faulty": (68, 68, 239),
+    "warning": (0, 165, 255),
+    "info": (0, 220, 255),
+    "text": (251, 250, 249),
+    "secondary": (175, 163, 156),
+}
+STATUS_COLOR = {
+    STATUS_FAULTY: UI_COLORS["faulty"],
+    STATUS_OK: UI_COLORS["pass"],
+    STATUS_UNALIGNED: UI_COLORS["info"],
 }
 ANSI = {
     STATUS_FAULTY: "\033[91m",
     STATUS_OK: "\033[92m",
+    STATUS_UNALIGNED: "\033[93m",
 }
 ANSI_RESET = "\033[0m"
 
@@ -646,27 +672,7 @@ def evaluate_board_status(reference_components, detections, matches,
             return STATUS_FAULTY, stats
         return STATUS_OK, stats
 
-    # Không căn chỉnh được: chỉ đếm theo lớp để báo cáo. Số lượng đúng vẫn
-    # không chứng minh linh kiện nằm đúng vị trí nên luôn trả về FAULTY.
-    reference_counts = Counter(
-        normalize_component_class(c["class"]) for c in reference_components
-    )
-    detection_confidences = {}
-    for d in detections:
-        if d["confidence"] >= CONF:
-            detection_confidences.setdefault(
-                normalize_component_class(d["class"]), []).append(d["confidence"])
-
-    for class_name in set(reference_counts) | set(detection_confidences):
-        confidences = sorted(detection_confidences.get(class_name, []), reverse=True)
-        expected = reference_counts[class_name]
-        stats["missing"] += max(expected - len(confidences), 0)
-        stats["extra"] += sum(c >= EXTRA_MIN_CONF for c in confidences[expected:])
-
-    stats["matched"] = len(reference_components) - stats["missing"]
-    stats["missing_components"] = ["count mismatch"] * stats["missing"]
-    stats["extra_components"] = ["count mismatch"] * stats["extra"]
-    return STATUS_FAULTY, stats
+    return STATUS_UNALIGNED, stats
 
 
 # ============================================================
@@ -681,12 +687,14 @@ def draw_results(frame, detections, reference_components, matches,
     for det_index, det in enumerate(detections):
         x1, y1, x2, y2 = int(det["x1"]), int(det["y1"]), int(det["x2"]), int(det["y2"])
 
-        if aligned and det_index in matched_detections:
-            color, tag = (0, 255, 0), "OK"
+        if not aligned:
+            color, tag = UI_COLORS["info"], "DETECTED"
+        elif det_index in matched_detections:
+            color, tag = UI_COLORS["pass"], "OK"
         elif det["confidence"] >= EXTRA_MIN_CONF:
-            color, tag = (0, 0, 255), "EXTRA"
+            color, tag = UI_COLORS["faulty"], "EXTRA"
         else:
-            color, tag = (0, 165, 255), "LOW"
+            color, tag = UI_COLORS["warning"], "LOW"
 
         cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
         cv2.putText(output, f'{det["class"]} {det["confidence"]:.2f} {tag}',
@@ -707,7 +715,7 @@ def draw_results(frame, detections, reference_components, matches,
                 px, py = int(px), int(py)
                 if not (0 <= px < w and 0 <= py < h):
                     continue
-                color = (255, 0, 255)
+                color = UI_COLORS["faulty"]
                 cv2.circle(output, (px, py), 10, color, 2)
                 cv2.putText(output, f'MISSING {reference_components[i]["class"]}',
                             (px + 12, py), cv2.FONT_HERSHEY_SIMPLEX,
@@ -721,14 +729,21 @@ def draw_results(frame, detections, reference_components, matches,
 
 
 def draw_header(output, status, stats, aligned):
-    cv2.rectangle(output, (0, 0), (520, 80), (25, 25, 25), -1)
+    header_width = min(output.shape[1], 520)
+    cv2.rectangle(output, (0, 0), (header_width - 1, 79),
+                  UI_COLORS["background"], -1)
+    cv2.rectangle(output, (0, 0), (header_width - 1, 79),
+                  UI_COLORS["border"], 1)
+    cv2.rectangle(output, (0, 0), (4, 79), STATUS_COLOR[status], -1)
     cv2.putText(output, STATUS_TEXT_IMAGE[status], (10, 38),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, STATUS_COLOR[status], 3, cv2.LINE_AA)
-    prefix = "Position check" if aligned else "Alignment unavailable; count check"
-    info = (f'{prefix}: Matched: {stats["matched"]}  '
-            f'Missing: {stats["missing"]}  Extra: {stats["extra"]}')
+    if aligned:
+        info = (f'Position check: Matched: {stats["matched"]}  '
+                f'Missing: {stats["missing"]}  Extra: {stats["extra"]}')
+    else:
+        info = f'Components detected: {stats["detected"]}  QA unavailable: alignment failed'
     cv2.putText(output, info, (10, 68), cv2.FONT_HERSHEY_SIMPLEX,
-                0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                0.6, UI_COLORS["secondary"], 2, cv2.LINE_AA)
 
     details = []
     if stats["missing_components"]:
@@ -736,17 +751,26 @@ def draw_header(output, status, stats, aligned):
     if stats["extra_components"]:
         details.append(f'Extra: {", ".join(stats["extra_components"])}')
     if details:
-        cv2.rectangle(output, (0, 80), (min(output.shape[1], 900), 112),
-                      (25, 25, 25), -1)
+        details_width = min(output.shape[1], 900)
+        cv2.rectangle(output, (0, 80), (details_width - 1, 112),
+                      UI_COLORS["panel"], -1)
+        cv2.rectangle(output, (0, 80), (details_width - 1, 112),
+                      UI_COLORS["border"], 1)
         cv2.putText(output, " | ".join(details), (10, 104),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    UI_COLORS["text"], 2, cv2.LINE_AA)
 
     return output
 
 
 def draw_status_overlay(image, status):
     output = image.copy()
-    cv2.rectangle(output, (0, 0), (520, 48), (25, 25, 25), -1)
+    banner_width = min(output.shape[1], 520)
+    cv2.rectangle(output, (0, 0), (banner_width - 1, 48),
+                  UI_COLORS["background"], -1)
+    cv2.rectangle(output, (0, 0), (banner_width - 1, 48),
+                  UI_COLORS["border"], 1)
+    cv2.rectangle(output, (0, 0), (4, 48), STATUS_COLOR[status], -1)
     cv2.putText(output, STATUS_TEXT_IMAGE[status], (10, 38),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, STATUS_COLOR[status], 3, cv2.LINE_AA)
     return output
@@ -850,6 +874,7 @@ class PCBChecker:
 
         status, stats = evaluate_board_status(
             self.reference_components, shown, matches, used_references, aligned)
+        stats["detected"] = len(detections)
 
         annotated = draw_results(
             board_crop, shown, self.reference_components, matches,
@@ -988,13 +1013,17 @@ def main():
                 if live is frame:
                     live = frame.copy()
 
-                cv2.rectangle(live, (0, 0), (live.shape[1], 58), (25, 25, 25), -1)
+                cv2.rectangle(live, (0, 0), (live.shape[1], 58),
+                              UI_COLORS["background"], -1)
+                cv2.line(live, (0, 58), (live.shape[1], 58),
+                         UI_COLORS["border"], 1, cv2.LINE_AA)
+                cv2.rectangle(live, (0, 0), (4, 58), UI_COLORS["primary"], -1)
                 if last_status is not None:
                     cv2.putText(live, f"Last: {STATUS_TEXT_IMAGE[last_status]}",
                                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                 STATUS_COLOR[last_status], 2, cv2.LINE_AA)
                 cv2.putText(live, "s: Chup va nhan dien | q: Thoat", (10, 52),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, UI_COLORS["secondary"], 2,
                             cv2.LINE_AA)
 
                 cv2.imshow(WINDOW_LIVE, live)

@@ -10,11 +10,18 @@ from ultralytics import YOLO
 # 1. CẤU HÌNH
 # ============================================================
 
-MODEL_PATH = "best.pt"
-REFERENCE_IMAGE = "2.jpg"
+PROJECT_DIR = Path(__file__).resolve().parent
+BACKEND_STORAGE = PROJECT_DIR / "backend" / "storage"
+MODEL_PATH = (
+    PROJECT_DIR / "backend" / "models" / "best.pt"
+    if (PROJECT_DIR / "backend" / "models" / "best.pt").is_file()
+    else PROJECT_DIR / "best.pt"
+)
+REFERENCE_IMAGE = PROJECT_DIR / "2.jpg"
 
-OUTPUT_JSON = "reference_components.json"
-OUTPUT_IMAGE = "reference_detected.jpg"
+REFERENCE_OUTPUT_IMAGE = BACKEND_STORAGE / "reference.jpg"
+OUTPUT_JSON = BACKEND_STORAGE / "reference_components.json"
+OUTPUT_IMAGE = BACKEND_STORAGE / "reference_detected.jpg"
 
 CONF = 0.25
 IMGSZ = 960
@@ -117,14 +124,22 @@ def create_reference_map():
                 cv2.LINE_AA,
             )
 
+    if not components:
+        raise RuntimeError(
+            "Không phát hiện được linh kiện; không lưu reference map rỗng."
+        )
+
     output_data = {
-        "image": image_path.name,
+        "image": REFERENCE_OUTPUT_IMAGE.name,
         "image_width": w,
         "image_height": h,
         "components_count": len(components),
         "components": components,
     }
 
+    BACKEND_STORAGE.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(REFERENCE_OUTPUT_IMAGE), image):
+        raise RuntimeError(f"Không lưu được ảnh reference: {REFERENCE_OUTPUT_IMAGE}")
     with open(OUTPUT_JSON, "w", encoding="utf-8") as output_file:
         json.dump(output_data, output_file, ensure_ascii=False, indent=2)
 

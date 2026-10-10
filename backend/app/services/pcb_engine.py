@@ -1,3 +1,5 @@
+"""YOLO detection, PCB alignment, and reference-based quality inspection."""
+
 import json
 import os
 import time
@@ -39,6 +41,7 @@ BOARD_PADDING_RATIO = 0.05
 
 STATUS_OK = "OK"
 STATUS_FAULTY = "FAULTY"
+STATUS_UNALIGNED = "UNALIGNED"
 
 CLASS_ALIASES = {
     "potentiometer": "variable resistor",
@@ -347,27 +350,11 @@ def evaluate_board_status(reference_components, detections, matches, used_refere
             if i not in matched_detections and d["confidence"] >= extra_min_conf
         ]
         stats["extra"] = len(stats["extra_components"])
-        if stats["missing"] > missing_allowed:
+        if stats["missing"] > missing_allowed or stats["extra"] > extra_allowed:
             return STATUS_FAULTY, stats
         return STATUS_OK, stats
 
-    # Không căn chỉnh được: đếm số lượng từng class
-    reference_counts = Counter(normalize_component_class(c["class"]) for c in reference_components)
-    detection_confidences = {}
-    for d in detections:
-        if d["confidence"] >= conf_thresh:
-            detection_confidences.setdefault(normalize_component_class(d["class"]), []).append(d["confidence"])
-
-    for class_name in set(reference_counts) | set(detection_confidences):
-        confidences = sorted(detection_confidences.get(class_name, []), reverse=True)
-        expected = reference_counts[class_name]
-        stats["missing"] += max(expected - len(confidences), 0)
-        stats["extra"] += sum(c >= extra_min_conf for c in confidences[expected:])
-
-    stats["matched"] = len(reference_components) - stats["missing"]
-    stats["missing_components"] = ["Khác biệt số lượng"] * stats["missing"]
-    stats["extra_components"] = ["Khác biệt số lượng"] * stats["extra"]
-    return STATUS_FAULTY, stats
+    return STATUS_UNALIGNED, stats
 
 
 # ============================================================
@@ -610,7 +597,11 @@ class PCBPipeline:
         detailed_detections = []
         for i, det in enumerate(shown_detections):
             d_item = det.copy()
-            if aligned and i in matched_detection_indices:
+            if not aligned:
+                d_item["status"] = "DETECTED"
+                d_item["matched_ref_id"] = None
+                d_item["matched_ref_class"] = None
+            elif i in matched_detection_indices:
                 d_item["status"] = "OK"
                 ref_idx = match_map[i]
                 d_item["matched_ref_id"] = self.reference_components[ref_idx].get("id", ref_idx + 1)
@@ -646,6 +637,9 @@ class PCBPipeline:
             if det_status == "OK":
                 color = (0, 230, 0)      # Xanh lá
                 tag = "OK"
+            elif det_status == "DETECTED":
+                color = (0, 220, 255)
+                tag = "DETECTED"
             elif det_status == "EXTRA":
                 color = (0, 0, 255)      # Đỏ
                 tag = "DIFF"
@@ -675,22 +669,38 @@ class PCBPipeline:
                 print(f"[PCBPipeline] Draw missing points error: {e}")
 
         # Vẽ Header trạng thái
-        status_color = (0, 220, 0) if status == STATUS_OK else (0, 0, 235)
-        status_label = "MẠCH ĐẠT CHUẨN (OK)" if status == STATUS_OK else "MẠCH BỊ LỖI (FAULTY)"
+        status_color = (
+            (0, 220, 0) if status == STATUS_OK else
+            (0, 190, 255) if status == STATUS_UNALIGNED else
+            (0, 0, 235)
+        )
+        status_label = {
+            STATUS_OK: "MẠCH ĐẠT CHUẨN (OK)",
+            STATUS_FAULTY: "MẠCH BỊ LỖI (FAULTY)",
+            STATUS_UNALIGNED: "ĐÃ QUÉT - CHƯA ĐỐI CHIẾU",
+        }[status]
 
         header_h = 75
         cv2.rectangle(annotated, (0, 0), (min(annotated.shape[1], 560), header_h), (20, 20, 25), -1)
         cv2.putText(annotated, status_label, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, status_color, 2, cv2.LINE_AA)
 
-        summary_txt = f"Matched: {stats['matched']} | Missing: {stats['missing']} | Diff: {stats['extra']}"
+        if aligned:
+            summary_txt = f"Matched: {stats['matched']} | Missing: {stats['missing']} | Diff: {stats['extra']}"
+        else:
+            summary_txt = f"Detected: {len(raw_detections)} | QA: alignment unavailable"
         cv2.putText(annotated, summary_txt, (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
 
         proc_time = round((time.time() - start_time) * 1000, 2)
 
         return {
             "status": status,
-            "status_vi": "MẠCH ĐẠT CHUẨN" if status == STATUS_OK else "MẠCH BỊ LỖI",
+            "status_vi": {
+                STATUS_OK: "MẠCH ĐẠT CHUẨN",
+                STATUS_FAULTY: "MẠCH BỊ LỖI",
+                STATUS_UNALIGNED: "ĐÃ QUÉT - CHƯA ĐỐI CHIẾU",
+            }[status],
             "aligned": aligned,
+            "qa_available": aligned,
             "alignment_method": align_method,
             "crop_method": crop_method,
             "stats": {
@@ -698,6 +708,7 @@ class PCBPipeline:
                 "reference_count": len(self.reference_components),
                 "detected_count": len(raw_detections),
             },
+            "class_counts": dict(Counter(d["class"] for d in raw_detections)),
             "detections": detailed_detections,
             "missing_components_details": missing_details,
             "annotated_image": annotated,
@@ -748,6 +759,12 @@ class PCBPipeline:
                 cv2.putText(annotated, label, (int(x1), max(int(y1) - 8, 18)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
 
+        if not components:
+            raise RuntimeError(
+                "Không nhận diện được linh kiện trong ảnh mạch chuẩn. "
+                "Hãy dùng ảnh rõ nét hơn hoặc giảm ngưỡng confidence."
+            )
+
         output_data = {
             "image": Path(self.ref_image_path).name,
             "image_width": w,
@@ -757,8 +774,11 @@ class PCBPipeline:
         }
 
         # Lưu ảnh và json
-        cv2.imwrite(self.ref_image_path, image_np)
-        cv2.imwrite("reference_detected.jpg", annotated)
+        if not cv2.imwrite(self.ref_image_path, image_np):
+            raise RuntimeError(f"Không lưu được ảnh mạch chuẩn: {self.ref_image_path}")
+        detected_path = Path(self.ref_image_path).with_name("reference_detected.jpg")
+        if not cv2.imwrite(str(detected_path), annotated):
+            raise RuntimeError(f"Không lưu được ảnh linh kiện reference đã nhận diện: {detected_path}")
         with open(self.ref_json_path, "w", encoding="utf-8") as f:
             json.dump(output_data, f, ensure_ascii=False, indent=2)
 

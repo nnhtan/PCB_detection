@@ -1,0 +1,124 @@
+import cv2
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
+
+from backend.app.api.v1.common import (
+    get_camera,
+    get_pipeline,
+    image_to_data_uri,
+    inspection_payload,
+    run_inspection,
+)
+from backend.app.core import config
+from backend.app.services.pcb_engine import (
+    DEFAULT_CONF,
+    DEFAULT_IMGSZ,
+    DEFAULT_TOLERANCE_RATIO,
+)
+
+router = APIRouter()
+
+
+@router.get("/camera/status")
+def camera_status(request: Request):
+    return {"status": "success", "camera": get_camera(request).get_status()}
+
+
+@router.post("/camera/connect")
+def camera_connect(
+    request: Request, source: str = Form(config.CAMERA_SOURCE)
+):
+    connected, message = get_camera(request).connect(source)
+    return {
+        "status": "success" if connected else "error",
+        "message": message,
+        "camera": get_camera(request).get_status(),
+    }
+
+
+@router.post("/camera/disconnect")
+def camera_disconnect(request: Request):
+    _, message = get_camera(request).disconnect()
+    return {
+        "status": "success",
+        "message": message,
+        "camera": get_camera(request).get_status(),
+    }
+
+
+@router.get("/camera/stream")
+def camera_stream(request: Request):
+    return StreamingResponse(
+        get_camera(request).mjpeg_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@router.post("/camera/scan")
+async def camera_scan(
+    request: Request,
+    conf: float = Form(DEFAULT_CONF),
+    imgsz: int = Form(DEFAULT_IMGSZ),
+    tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
+):
+    camera = get_camera(request)
+    frame, frame_id, fps = camera.get_frame()
+    if frame is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Camera chưa kết nối hoặc chưa nhận được khung hình.",
+        )
+    result = await run_in_threadpool(
+        run_inspection,
+        get_pipeline(request),
+        frame,
+        {
+            "conf": conf,
+            "imgsz": imgsz,
+            "tolerance_ratio": tolerance_ratio,
+        },
+    )
+    payload = inspection_payload(result)
+    payload.update({"frame_id": frame_id, "camera_fps": fps})
+    return payload
+
+
+@router.post("/camera/snapshot")
+async def camera_snapshot(
+    request: Request,
+    source: str = Form(config.CAMERA_SOURCE),
+    conf: float = Form(DEFAULT_CONF),
+    imgsz: int = Form(DEFAULT_IMGSZ),
+    tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
+):
+    camera_source: str | int
+    try:
+        camera_source = int(source)
+    except ValueError:
+        camera_source = source.strip()
+    capture = cv2.VideoCapture(camera_source)
+    try:
+        if not capture.isOpened():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Không kết nối được với camera nguồn: {camera_source}.",
+            )
+        ok, frame = capture.read()
+    finally:
+        capture.release()
+    if not ok or frame is None:
+        raise HTTPException(status_code=500, detail="Không nhận được frame từ camera.")
+    result = await run_in_threadpool(
+        run_inspection,
+        get_pipeline(request),
+        frame,
+        {
+            "conf": conf,
+            "imgsz": imgsz,
+            "tolerance_ratio": tolerance_ratio,
+        },
+    )
+    payload = inspection_payload(result)
+    payload["raw_image"] = image_to_data_uri(frame)
+    return payload

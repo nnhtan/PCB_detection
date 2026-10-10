@@ -1,54 +1,73 @@
-import io
+"""Smoke-test the running FastAPI service using the bundled sample PCB image."""
+
 import json
-from backendweb import app
+import os
+import uuid
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
-def test_backend():
-    client = app.test_client()
 
-    print("1. Testing GET / ...")
-    res = client.get('/')
-    assert res.status_code == 200, f"Expected 200, got {res.status_code}"
-    print("   -> OK (HTML served, length:", len(res.data), ")")
+BASE_URL = os.getenv("PCB_API_URL", "http://127.0.0.1:8000").rstrip("/")
+SAMPLE_PATH = Path(__file__).resolve().with_name("2.jpg")
 
-    print("2. Testing GET /api/info ...")
-    res = client.get('/api/info')
-    assert res.status_code == 200
-    info = res.get_json()
-    print("   -> OK:", info["model_name"], "| Device:", info["device"], "| Classes:", info["total_classes"])
 
-    print("3. Testing GET /api/reference ...")
-    res = client.get('/api/reference')
-    assert res.status_code == 200
-    ref = res.get_json()
-    print("   -> OK: Reference components count =", ref["components_count"])
+def request_json(path: str, request: Request | None = None) -> dict:
+    try:
+        with urlopen(request or f"{BASE_URL}{path}", timeout=60) as response:
+            return json.loads(response.read())
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise AssertionError(f"{path} returned HTTP {error.code}: {detail}") from error
 
-    print("4. Testing GET /api/sample ...")
-    res = client.get('/api/sample')
-    assert res.status_code == 200
-    sample = res.get_json()
-    print("   -> OK: Sample image loaded, dimensions:", sample["width"], "x", sample["height"])
 
-    print("5. Testing POST /api/detect with 2.jpg ...")
-    with open('2.jpg', 'rb') as f:
-        img_bytes = f.read()
-    res = client.post('/api/detect', data={'image': (io.BytesIO(img_bytes), '2.jpg')})
-    assert res.status_code == 200
-    det = res.get_json()
-    print("   -> OK: Total detections =", det["total_count"], "| Latency =", det["latency_ms"], "ms")
+def post_image(path: str, image_path: Path, values: dict[str, str] | None = None) -> dict:
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+    for name, value in (values or {}).items():
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        body.extend(f"{value}\r\n".encode())
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(
+        f'Content-Disposition: form-data; name="image"; filename="{image_path.name}"\r\n'.encode()
+    )
+    body.extend(b"Content-Type: image/jpeg\r\n\r\n")
+    body.extend(image_path.read_bytes())
+    body.extend(f"\r\n--{boundary}--\r\n".encode())
+    request = Request(
+        f"{BASE_URL}{path}",
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    return request_json(path, request)
 
-    print("6. Testing POST /api/inspect with 2.jpg ...")
-    res = client.post('/api/inspect', data={'image': (io.BytesIO(img_bytes), '2.jpg'), 'conf': '0.25'})
-    assert res.status_code == 200
-    insp = res.get_json()
-    print("   -> OK: Verdict =", insp["verdict"], "| Matched =", insp["stats"]["matched"], "| Missing =", insp["stats"]["missing"], "| Sai khác =", insp["stats"]["extra"], "| Latency =", insp["latency_ms"], "ms")
 
-    print("7. Testing GET /api/camera/status ...")
-    res = client.get('/api/camera/status')
-    assert res.status_code == 200
-    cam_status = res.get_json()
-    print("   -> OK: Camera status =", cam_status["camera"])
+def test_backend() -> None:
+    assert SAMPLE_PATH.is_file(), f"Sample image is missing: {SAMPLE_PATH}"
+    health = request_json("/health")
+    assert health["status"] == "ok"
+    info = request_json("/api/info")
+    reference = request_json("/api/reference")
+    sample = request_json("/api/sample")
+    camera = request_json("/api/camera/status")
+    assert info["status"] == "success"
+    assert sample.get("image", "").startswith("data:image/")
+    assert "camera" in camera
+    detected = post_image("/api/detect", SAMPLE_PATH)
+    assert detected["status"] == "success"
+    assert "detections" in detected
+    if reference.get("components_count", 0):
+        inspected = post_image("/api/inspect", SAMPLE_PATH, {"conf": "0.25"})
+        assert inspected["status"] == "success"
+        assert "qa_available" in inspected
+    print(
+        "FastAPI smoke test passed:",
+        f"{detected['total_count']} detections,",
+        f"{reference.get('components_count', 0)} reference components",
+    )
 
-    print("\nALL 7 TESTS PASSED SUCCESSFULLY! 🎉")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_backend()

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Camera, CircleStop, LoaderCircle, ScanLine, Video } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Camera, CircleStop, LoaderCircle, ScanLine, Video, Workflow } from "lucide-react";
 import PageHeader from "../common/PageHeader.jsx";
 import InspectionResults from "../inspector/InspectionResults.jsx";
 import { useCamera } from "../../hooks/useCamera.js";
@@ -11,7 +11,13 @@ export default function CameraPanel() {
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
   const [result, setResult] = useState(null);
-  const scan = async () => {
+  const [autoScan, setAutoScan] = useState(false);
+  const [scanInterval, setScanInterval] = useState(3);
+  const scanInProgress = useRef(false);
+
+  const scan = useCallback(async () => {
+    if (scanInProgress.current) return;
+    scanInProgress.current = true;
     setScanBusy(true);
     setScanError("");
     try {
@@ -20,16 +26,43 @@ export default function CameraPanel() {
     } catch (requestError) {
       setScanError(requestError.message);
     } finally {
+      scanInProgress.current = false;
       setScanBusy(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (!autoScan || !status?.connected) return undefined;
+    const timer = window.setInterval(scan, scanInterval * 1000);
+    return () => window.clearInterval(timer);
+  }, [autoScan, scan, scanInterval, status?.connected]);
+
+  const stopCamera = async () => {
+    setAutoScan(false);
+    await disconnect();
   };
+
   return (
     <>
       <PageHeader eyebrow="LIVE INSPECTION" title="Camera trực tiếp" description="Kết nối webcam hoặc camera IP để xem stream và quét PCB ngay tại chỗ." />
       <div className="panel-card camera-panel">
         <div className="camera-toolbar">
           <label className="camera-source"><span>Nguồn camera</span><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="0 hoặc URL camera IP" /></label>
-          <div className="camera-actions">{status?.connected ? <button className="button button-danger" disabled={cameraBusy} onClick={disconnect}><CircleStop size={16} /> Ngắt kết nối</button> : <button className="button button-primary" disabled={cameraBusy || !source.trim()} onClick={() => connect(source)}>{cameraBusy ? <LoaderCircle className="spin" size={16} /> : <Video size={16} />} Kết nối camera</button>}<button className="button button-light" disabled={!status?.connected || scanBusy} onClick={scan}>{scanBusy ? <LoaderCircle className="spin" size={16} /> : <ScanLine size={16} />} Quét khung hình</button></div>
+          <div className="camera-actions">
+            {status?.connected ? <button className="button button-danger" disabled={cameraBusy} onClick={stopCamera}><CircleStop size={16} /> Ngắt kết nối</button> : <button className="button button-primary" disabled={cameraBusy || !source.trim()} onClick={() => connect(source)}>{cameraBusy ? <LoaderCircle className="spin" size={16} /> : <Video size={16} />} Kết nối camera</button>}
+            <button className="button button-light" disabled={!status?.connected || scanBusy} onClick={scan}>{scanBusy ? <LoaderCircle className="spin" size={16} /> : <ScanLine size={16} />} Quét khung hình</button>
+            <div className="auto-scan-controls">
+              <label className="auto-scan-interval" htmlFor="camera-scan-interval">Mỗi</label>
+              <select id="camera-scan-interval" value={scanInterval} onChange={(event) => setScanInterval(Number(event.target.value))} aria-label="Chu kỳ quét tự động">
+                <option value={3}>3 giây</option>
+                <option value={5}>5 giây</option>
+                <option value={10}>10 giây</option>
+              </select>
+              <button className={`button auto-scan-button ${autoScan ? "active" : ""}`} disabled={!status?.connected} aria-pressed={autoScan} onClick={() => setAutoScan((enabled) => !enabled)}>
+                <Workflow size={15} /> {autoScan ? "Dừng tự động" : "Tự động quét"}
+              </button>
+            </div>
+          </div>
         </div>
         {(cameraError || scanError) && <div className="alert alert-error">{cameraError || scanError}</div>}
         <div className="camera-workspace">
@@ -40,7 +73,7 @@ export default function CameraPanel() {
             {!status?.connected && <div className="camera-overlay"><div className="camera-placeholder"><Camera size={30} /><strong>Chưa kết nối camera</strong><span>Nhập chỉ số webcam (0) hoặc URL camera IP phía trên</span></div></div>}
           </section>
           <section className="camera-result-panel">
-            <div className="section-title"><div><h2><ScanLine size={18} /> Kết quả & đánh giá</h2><p>{result ? `Khung hình #${result.frame_id || status?.frame_id || "—"}` : "Quét khung hình để xem đánh giá PCB"}</p></div></div>
+            <div className="section-title"><div><h2><ScanLine size={18} /> Kết quả & đánh giá</h2><p>{autoScan ? `Đang tự động quét mỗi ${scanInterval} giây` : result ? `Khung hình #${result.frame_id || status?.frame_id || "—"}` : "Quét khung hình để xem đánh giá PCB"}</p></div></div>
             {result ? <InspectionResults result={result} /> : (
               <div className="camera-result-empty">
                 <span><ScanLine size={21} /></span>

@@ -12,6 +12,7 @@ async function request(path, options = {}) {
 export const api = {
   get: (path) => request(path),
   postForm: (path, form) => request(path, { method: "POST", body: form }),
+  delete: (path) => request(path, { method: "DELETE" }),
   postJson: (path, body) =>
     request(path, {
       method: "POST",

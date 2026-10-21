@@ -74,7 +74,7 @@ export default function CameraPanel() {
 
   return (
     <>
-      <PageHeader eyebrow="LIVE INSPECTION" title="Camera trực tiếp" description="Kết nối webcam hoặc camera IP để xem stream và quét PCB ngay tại chỗ." />
+      <PageHeader eyebrow="LIVE INSPECTION" title="Camera trực tiếp" description="Kết nối webcam hoặc camera IP để xem stream; vùng PCB được tự động cắt trước khi nhận diện." />
       <div className="panel-card camera-panel">
         <div className="camera-toolbar">
           <label className="camera-source"><span>Nguồn camera</span><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="0 hoặc URL camera IP" /></label>

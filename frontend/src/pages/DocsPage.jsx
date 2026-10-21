@@ -7,6 +7,7 @@ const endpoints = [
   ["GET", "/api/reference", "Danh mục, ảnh và linh kiện mạch tham chiếu"],
   ["POST", "/api/reference/update", "Tải ảnh mạch chuẩn, tạo reference map"],
   ["POST", "/api/reference/select", "Chọn mạch tham chiếu đã lưu"],
+  ["DELETE", "/api/reference/{reference_id}", "Xóa mạch tham chiếu đã lưu"],
   ["POST", "/api/inspect", "Quét PCB và đối chiếu với reference"],
   ["POST", "/api/detect", "Chạy YOLO nhận diện độc lập"],
   ["GET", "/api/camera/status", "Trạng thái camera"],

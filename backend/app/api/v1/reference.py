@@ -61,6 +61,29 @@ async def select_reference(request: Request, reference_id: str = Form(...)):
     }
 
 
+@router.delete("/reference/{reference_id}")
+def delete_reference(request: Request, reference_id: str):
+    catalog = get_reference_catalog(request)
+    try:
+        result = catalog.delete(reference_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    deleted = result["reference"]
+    active = result["active_reference"]
+    message = f"Đã xóa mạch tham chiếu: {deleted['name']}."
+    if active is not None:
+        message += f" Đang dùng mạch: {active['name']}."
+    else:
+        message += " Danh mục hiện chưa có mạch tham chiếu."
+    return {
+        "status": "success",
+        "message": message,
+        "active_reference_id": active["id"] if active is not None else None,
+    }
+
+
 @router.post("/reference/update")
 async def update_reference(
     request: Request,

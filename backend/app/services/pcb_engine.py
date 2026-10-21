@@ -38,6 +38,7 @@ MAX_BOARD_AREA_RATIO = 2.00
 BOARD_DETECTION_SIZE = (640, 240)
 BOARD_CONTOUR_MIN_AREA = 20000
 BOARD_PADDING_RATIO = 0.05
+BOARD_ROI_PADDING_RATIO = 0.015
 
 STATUS_OK = "OK"
 STATUS_FAULTY = "FAULTY"
@@ -72,7 +73,7 @@ def order_points(points):
 _BOARD_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 _ROI_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
 _ROI_OPEN_KERNEL = np.ones((5, 5), dtype=np.uint8)
-_BLUE_LOW = np.array([85, 35, 20], dtype=np.uint8)
+_BLUE_LOW = np.array([85, 70, 35], dtype=np.uint8)
 _BLUE_HIGH = np.array([145, 255, 255], dtype=np.uint8)
 
 
@@ -151,8 +152,8 @@ def find_board_roi(frame):
     if (cv2.contourArea(contour) < frame_height * frame_width * 0.005 or width < 80 or height < 80):
         return None
 
-    pad_x = int(width * BOARD_PADDING_RATIO)
-    pad_y = int(height * BOARD_PADDING_RATIO)
+    pad_x = int(width * BOARD_ROI_PADDING_RATIO)
+    pad_y = int(height * BOARD_ROI_PADDING_RATIO)
     x1, y1 = max(0, x - pad_x), max(0, y - pad_y)
     x2 = min(frame_width, x + width + pad_x)
     y2 = min(frame_height, y + height + pad_y)

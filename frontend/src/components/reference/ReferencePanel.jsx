@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, CircuitBoard, LoaderCircle, RefreshCw, UploadCloud } from "lucide-react";
+import { Check, CircuitBoard, LoaderCircle, RefreshCw, Trash2, UploadCloud } from "lucide-react";
 import PageHeader from "../common/PageHeader.jsx";
 import UploadCard from "../common/UploadCard.jsx";
 import { api, imageForm } from "../../services/api.js";
@@ -62,6 +62,21 @@ export default function ReferencePanel() {
       setBusy(false);
     }
   };
+  const deleteReference = async (item) => {
+    if (!window.confirm(`Bạn có chắc muốn xóa mạch tham chiếu "${item.name}" không?`)) return;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api.delete(`/api/reference/${encodeURIComponent(item.id)}`);
+      await loadReference();
+      setMessage(result.message);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <>
       <PageHeader eyebrow="REFERENCE BOARD" title="Mạch tham chiếu" description="Nạp ảnh mạch chuẩn riêng để hệ thống lưu bản đồ vị trí linh kiện dùng cho các lượt kiểm tra." action={<button className="button button-light button-small" onClick={() => loadReference().catch((loadError) => setError(loadError.message))}><RefreshCw size={15} /> Làm mới</button>} />
@@ -91,10 +106,15 @@ export default function ReferencePanel() {
                       <strong>{item.name}</strong>
                       <span>{item.components_count} linh kiện · {new Date(item.created_at).toLocaleDateString("vi-VN")}</span>
                     </div>
-                    <button className={`button ${active ? "catalog-selected" : "button-light"} button-small`} disabled={busy || active} onClick={() => selectReference(item.id)}>
-                      {busy && !active ? <LoaderCircle className="spin" size={14} /> : active ? <Check size={14} /> : <CircuitBoard size={14} />}
-                      {active ? "Đang dùng" : "Chọn mạch"}
-                    </button>
+                    <div className="reference-catalog-actions">
+                      <button className={`button ${active ? "catalog-selected" : "button-light"} button-small`} disabled={busy || active} onClick={() => selectReference(item.id)}>
+                        {busy && !active ? <LoaderCircle className="spin" size={14} /> : active ? <Check size={14} /> : <CircuitBoard size={14} />}
+                        {active ? "Đang dùng" : "Chọn mạch"}
+                      </button>
+                      <button className="button button-danger button-small reference-delete-button" disabled={busy} onClick={() => deleteReference(item)} aria-label={`Xóa mạch ${item.name}`} title="Xóa mạch tham chiếu">
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 );
               })}

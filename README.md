@@ -17,7 +17,7 @@
 
 ## Chức năng
 
-- **Danh mục mạch tham chiếu:** lưu nhiều ảnh PCB chuẩn với tên riêng, chọn lại hoặc xóa mạch không còn sử dụng; lựa chọn hiện tại được giữ sau khi backend khởi động lại.
+- **Danh mục mạch tham chiếu:** lưu nhiều ảnh PCB chuẩn với tên riêng, chọn lại mạch cần dùng bất cứ lúc nào; lựa chọn hiện tại được giữ sau khi backend khởi động lại.
 - **Kiểm tra PCB:** tải ảnh PCB cần kiểm tra riêng, căn chỉnh với mạch chuẩn, so sánh vị trí và phân loại linh kiện thiếu/thừa.
 - **Nhận diện YOLO:** phát hiện và thống kê linh kiện trong ảnh độc lập, không yêu cầu reference.
 - **Camera trực tiếp:** kết nối webcam hoặc camera IP, xem MJPEG, quét từng frame hoặc đặt quét tự động mỗi 3, 5, hoặc 10 giây.
@@ -53,7 +53,7 @@ PCB_detection/
 ├── best.pt                      # Model hiện có, dùng làm fallback
 ├── 2.jpg                        # Ảnh PCB mẫu/reference hiện có
 ├── machpcbgoc.py                # Tạo reference bằng script desktop
-├── test.py                      # Kiểm tra PCB
+├── test.py                      # Kiểm tra PCB bằng camera desktop
 └── test_api.py                  # Smoke test API
 ```
 
@@ -147,8 +147,7 @@ Chọn terminal của từng dịch vụ rồi nhấn **Ctrl + C**.
 3. Điều chỉnh ngưỡng tin cậy YOLO nếu cần.
 4. Chọn **Lưu mạch chuẩn** và chờ hệ thống nhận diện. Mạch mới được thêm vào danh mục và tự động chọn làm mạch đang dùng.
 5. Để chuyển sang một mạch đã lưu, chọn **Chọn mạch** ở dòng tương ứng. Mạch đang hoạt động được đánh dấu **Đang dùng**.
-6. Chọn nút thùng rác ở dòng mạch không còn cần dùng và xác nhận để xóa. Nếu xóa mạch đang dùng, hệ thống tự chuyển sang mạch khác còn lại; xóa mạch cuối cùng sẽ đưa hệ thống về trạng thái chưa có mạch tham chiếu.
-7. Kiểm tra ảnh YOLO đánh dấu và danh sách linh kiện. Ảnh không nhận diện được linh kiện sẽ không được lưu.
+6. Kiểm tra ảnh YOLO đánh dấu và danh sách linh kiện. Ảnh không nhận diện được linh kiện sẽ không được lưu.
 
 Mỗi mạch chuẩn được lưu riêng trong `backend\storage\references\<id>\`. Danh sách và mạch đang chọn được ghi trong `backend\storage\reference_catalog.json`. Mạch chuẩn cũ sẵn có được tự động đưa vào danh mục lần đầu backend khởi động với tên lấy từ dữ liệu reference ban đầu.
 
@@ -168,7 +167,7 @@ Trong **Nhận diện YOLO**, tải một ảnh rồi chọn **Nhận diện lin
 
 1. Nhập `0` để dùng webcam mặc định trên máy chạy backend, hoặc nhập URL stream camera IP.
 2. Chọn **Kết nối camera**.
-3. Chọn **Quét khung hình** để quét thủ công. Hệ thống tự tìm và cắt vùng PCB trước khi nhận diện; kết quả xuất hiện bên cạnh stream.
+3. Chọn **Quét khung hình** để quét thủ công. Kết quả xuất hiện bên cạnh stream.
 4. Chọn chu kỳ **3 giây**, **5 giây** hoặc **10 giây**, sau đó chọn **Tự động quét**. Chọn **Dừng tự động** để dừng; ngắt camera cũng sẽ dừng chế độ này.
 
 Camera index như `0` trỏ tới máy đang chạy backend, không phải máy đang mở trình duyệt. Để dùng camera IP, cả backend và thiết bị camera phải truy cập được URL stream.
@@ -184,7 +183,6 @@ Các endpoint có tại `/api/...`. Alias tương thích cũng được cung c�
 | `GET` | `/api/reference` | Reference map cùng ảnh PCB chuẩn và ảnh đã đánh dấu |
 | `POST` | `/api/reference/update` | Tạo/lưu reference từ ảnh upload |
 | `POST` | `/api/reference/select` | Kích hoạt một mạch đã lưu (`reference_id`) |
-| `DELETE` | `/api/reference/{reference_id}` | Xóa mạch tham chiếu theo ID |
 | `GET` | `/api/sample` | Trả ảnh mẫu dưới dạng data URI |
 | `POST` | `/api/detect` | YOLO detection độc lập |
 | `POST` | `/api/inspect` | Detection, căn chỉnh và QA theo reference |
@@ -204,7 +202,6 @@ Các endpoint upload ảnh nhận `multipart/form-data`, trường file bắt bu
 - `/api/detect`: `image`, `conf`, `imgsz`.
 - `/api/reference/update`: `image`, `name` (tùy chọn), `conf`, `imgsz`. Nếu bỏ `name`, tên file upload được dùng.
 - `/api/reference/select`: `reference_id` (ID lấy từ danh sách `catalog` của `/api/reference`).
-- `/api/reference/{reference_id}`: ID của mạch cần xóa (lấy từ danh sách `catalog` của `/api/reference`).
 - `/api/inspect`: `image`, `conf`, `imgsz`, `tolerance_ratio`, `extra_allowed`, `missing_allowed`, `auto_crop`.
 - `/api/camera/connect`: `source`.
 - `/api/camera/scan`: `conf`, `imgsz`, `tolerance_ratio`.

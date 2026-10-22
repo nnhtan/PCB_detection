@@ -10,7 +10,9 @@
       "class": "inductor",
       "confidence_reference": 0.9484,
       "x": 454.09,
-      "y": 147.85
+      "y": 147.85,
+      "box_width": 208.79000000000002,
+      "box_height": 215.28
     },
     {
       "id": 2,
@@ -18,7 +20,9 @@
       "class": "IC",
       "confidence_reference": 0.9321,
       "x": 709.7,
-      "y": 254.79
+      "y": 254.79,
+      "box_width": 209.99,
+      "box_height": 302.46000000000004
     },
     {
       "id": 3,
@@ -26,7 +30,9 @@
       "class": "diode",
       "confidence_reference": 0.9038,
       "x": 749.76,
-      "y": 39.68
+      "y": 39.68,
+      "box_width": 159.56000000000006,
+      "box_height": 70.42
     },
     {
       "id": 4,
@@ -34,7 +40,9 @@
       "class": "variable resistor",
       "confidence_reference": 0.8999,
       "x": 429.91,
-      "y": 345.65
+      "y": 345.65,
+      "box_width": 218.46000000000004,
+      "box_height": 132.57999999999998
     },
     {
       "id": 5,
@@ -42,7 +50,9 @@
       "class": "capacitor",
       "confidence_reference": 0.899,
       "x": 228.64,
-      "y": 198.25
+      "y": 198.25,
+      "box_width": 157.44000000000003,
+      "box_height": 150.32999999999998
     },
     {
       "id": 6,
@@ -50,7 +60,9 @@
       "class": "resistor",
       "confidence_reference": 0.8525,
       "x": 560.21,
-      "y": 375.62
+      "y": 375.62,
+      "box_width": 33.04000000000008,
+      "box_height": 60.849999999999966
     },
     {
       "id": 7,
@@ -58,7 +70,9 @@
       "class": "resistor",
       "confidence_reference": 0.8215,
       "x": 308.56,
-      "y": 362.12
+      "y": 362.12,
+      "box_width": 37.25,
+      "box_height": 65.23000000000002
     },
     {
       "id": 8,
@@ -66,7 +80,9 @@
       "class": "capacitor",
       "confidence_reference": 0.6737,
       "x": 561.13,
-      "y": 305.06
+      "y": 305.06,
+      "box_width": 31.50999999999999,
+      "box_height": 65.67999999999995
     },
     {
       "id": 9,
@@ -74,7 +90,9 @@
       "class": "capacitor",
       "confidence_reference": 0.6595,
       "x": 932.47,
-      "y": 201.11
+      "y": 201.11,
+      "box_width": 174.60000000000002,
+      "box_height": 146.01
     },
     {
       "id": 10,
@@ -82,7 +100,9 @@
       "class": "resistor",
       "confidence_reference": 0.6113,
       "x": 261.4,
-      "y": 362.13
+      "y": 362.13,
+      "box_width": 34.73999999999998,
+      "box_height": 67.19999999999999
     },
     {
       "id": 11,
@@ -90,7 +110,9 @@
       "class": "capacitor",
       "confidence_reference": 0.5863,
       "x": 868.0,
-      "y": 89.07
+      "y": 89.07,
+      "box_width": 43.14999999999998,
+      "box_height": 69.57000000000001
     }
   ]
 }

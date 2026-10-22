@@ -219,3 +219,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Camera captures & debug crops
+captures/
+crop_results/
+result_*.jpg
+temp_preview.jpg
+
+

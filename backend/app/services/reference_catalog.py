@@ -24,10 +24,6 @@ class ReferenceCatalog:
         self.references_dir = storage_dir / "references"
         self.operation_lock = operation_lock
         self.legacy_detected_path = legacy_detected_path
-        self.default_reference_paths = (
-            pipeline.ref_json_path,
-            pipeline.ref_image_path,
-        )
         self.references: list[dict[str, Any]] = []
         self.active_reference_id: str | None = None
         self._load_or_seed()
@@ -143,16 +139,6 @@ class ReferenceCatalog:
             raise
         return reference
 
-    def _clear_active_reference(self) -> None:
-        self.active_reference_id = None
-        self.pipeline.ref_json_path, self.pipeline.ref_image_path = (
-            self.default_reference_paths
-        )
-        self.pipeline.reference_data = None
-        self.pipeline.reference_components = []
-        self.pipeline.reference_image = None
-        self.pipeline.aligner = None
-
     def select(self, reference_id: str) -> dict[str, Any]:
         with self.operation_lock:
             try:
@@ -161,66 +147,6 @@ class ReferenceCatalog:
                 raise LookupError(
                     f"Không tìm thấy mạch tham chiếu có mã '{reference_id}'."
                 ) from exc
-
-    def delete(self, reference_id: str) -> dict[str, Any]:
-        with self.operation_lock:
-            index = next(
-                (
-                    index
-                    for index, reference in enumerate(self.references)
-                    if reference["id"] == reference_id
-                ),
-                None,
-            )
-            if index is None:
-                raise LookupError(
-                    f"Không tìm thấy mạch tham chiếu có mã '{reference_id}'."
-                )
-
-            reference = self.references[index]
-            was_active = self.active_reference_id == reference_id
-            fallback = next(
-                (
-                    item
-                    for item in self.references
-                    if item["id"] != reference_id
-                ),
-                None,
-            )
-
-            if was_active and fallback is not None:
-                self._activate(fallback["id"], persist=False)
-            elif was_active:
-                self._clear_active_reference()
-
-            self.references.pop(index)
-            try:
-                self._persist()
-            except Exception:
-                self.references.insert(index, reference)
-                if was_active:
-                    self._activate(reference_id, persist=False)
-                raise
-
-            try:
-                shutil.rmtree(self._reference_paths(reference_id)["folder"])
-            except OSError as exc:
-                raise RuntimeError(
-                    f"Đã xóa mạch khỏi danh mục nhưng không thể xóa dữ liệu lưu trữ "
-                    f"'{reference['name']}': {exc}"
-                ) from exc
-
-            return {
-                "reference": reference,
-                "active_reference": fallback if was_active else next(
-                    (
-                        item
-                        for item in self.references
-                        if item["id"] == self.active_reference_id
-                    ),
-                    None,
-                ),
-            }
 
     def create(
         self,
@@ -257,14 +183,11 @@ class ReferenceCatalog:
                 return result | {"reference": reference}
             except Exception:
                 self.pipeline.ref_json_path, self.pipeline.ref_image_path = previous_paths
-                self.active_reference_id = previous_id
-                self.references = previous_references
                 try:
-                    if previous_id is None:
-                        self._clear_active_reference()
-                    else:
-                        self.pipeline.load_reference()
+                    self.pipeline.load_reference()
                 finally:
+                    self.active_reference_id = previous_id
+                    self.references = previous_references
                     shutil.rmtree(paths["folder"])
                 raise
 

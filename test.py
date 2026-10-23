@@ -5,12 +5,17 @@ import threading
 import time
 from collections import Counter, deque
 from functools import lru_cache
+from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof, string_at
 from pathlib import Path
-from camera_viewer import HikCameraViewer
+
 import cv2
 import numpy as np
-import torch
-from ultralytics import YOLO
+try:
+    import torch
+    from ultralytics import YOLO
+except ImportError as import_error:  # chế độ --detect-only không cần YOLO
+    torch = YOLO = None
+    _IMPORT_ERROR = import_error
 
 sys.setrecursionlimit(5000)  # ghép linh kiện dùng đệ quy (augmenting path)
 
@@ -43,6 +48,19 @@ except ValueError:
 CAMERA_STARTUP_TIMEOUT_SECONDS = 10
 CAMERA_RECONNECT_AFTER_SECONDS = 3   # mất hình quá lâu thì tự mở lại camera
 
+# ---- Camera công nghiệp Hikvision (Hikrobot) tự động mở khi chạy chương trình ----
+# "auto": thử Hikvision trước, không thấy thì dùng SOURCE ở trên (IP Webcam / webcam)
+# "hikvision": chỉ dùng Hikvision (không thấy thì báo lỗi) | "ip": chỉ dùng SOURCE
+CAMERA_BACKEND = os.environ.get("PCB_CAMERA_BACKEND", "auto")
+HIK_EXPOSURE_US = float(os.environ.get("PCB_HIK_EXPOSURE_US", "30000"))
+                                    # mặc định 30 ms để giảm nhòe/chờ frame trên băng tải
+HIK_EXPOSURE_MIN_US = 1000.0         # giới hạn dưới khi giảm bằng phím
+HIK_MVIMPORT_PATHS = [               # nơi tìm module MvImport của Hikvision SDK
+    os.environ.get("HIK_MVIMPORT_PATH", ""),
+    str(PROJECT_DIR / "Python" / "MvImport"),
+    str(PROJECT_DIR.parent / "Python" / "MvImport"),
+]
+
 # ---- Nhận diện ----
 SMOOTHING_WINDOW = 1
 CONTRAST_ALPHA = 1.15
@@ -52,7 +70,7 @@ CONTRAST_BETA = -10
 CONF = 0.25
 IMGSZ = 1536
 MAX_DET = 1000
-USE_CUDA = torch.cuda.is_available()
+USE_CUDA = torch is not None and torch.cuda.is_available()
 DEVICE = 0 if USE_CUDA else "cpu"
 
 # ---- So sánh vị trí ----
@@ -73,17 +91,17 @@ MAX_BOARD_AREA_RATIO = 2.00
 
 # ---- Phát hiện & cắt khung PCB (lọc contour, 4 góc, ổn định nhiều frame) ----
 BOARD_FRAME_WIDTH = 640           # ảnh phân tích: cố định chiều rộng, giữ tỷ lệ gốc
-BOARD_MIN_AREA_RATIO = 0.02       # nhỏ hơn 2% khung hình -> nhiễu
+BOARD_MIN_AREA_RATIO = 0.01       # nhỏ hơn 1% khung hình -> nhiễu
 BOARD_MAX_AREA_RATIO = 0.90       # lớn hơn 90% khung hình -> mặt bàn / nền
-BOARD_MIN_SOLIDITY = 0.90         # diện tích contour / diện tích bao lồi
+BOARD_MIN_SOLIDITY = 0.80         # diện tích contour / diện tích bao lồi
 BOARD_MIN_RECTANGULARITY = 0.85   # diện tích bao lồi / hình chữ nhật nhỏ nhất
 BOARD_MIN_ASPECT = 0.25           # cạnh ngắn / cạnh dài
 BOARD_APPROX_EPS = (0.01, 0.015, 0.02, 0.03, 0.04, 0.06)
 BOARD_ANGLE_RANGE = (70, 110)     # góc trong hợp lệ của tứ giác (độ)
 BOARD_MAX_SIDE_RATIO = 1.6        # tỉ lệ tối đa giữa hai cạnh đối diện
-BOARD_MIN_SIDE_PX = 30
-BOARD_MINRECT_SOLIDITY = 0.93     # chỉ dùng minAreaRect khi contour đủ tin cậy
-BOARD_MINRECT_RECTANGULARITY = 0.92
+BOARD_MIN_SIDE_PX = 20
+BOARD_MINRECT_SOLIDITY = 0.75     # contour biên có thể đứt bởi linh kiện/hoa văn
+BOARD_MINRECT_RECTANGULARITY = 0.88
 BOARD_PAD_RATIO = 0.02            # đệm theo cạnh = 2% cạnh ngắn của PCB
 BOARD_PAD_MIN = 3
 BOARD_PAD_MAX = 15
@@ -92,15 +110,24 @@ BOARD_CONFIRM_FRAMES = 5          # số frame liên tiếp để xác nhận PC
 BOARD_MAX_MISS = 5                # mất PCB quá số frame này thì reset
 BOARD_SMOOTH_ALPHA = 0.4          # hệ số làm mượt tọa độ (EMA)
 BOARD_JUMP_PX = 40                # góc nhảy quá số px này bị coi là bất thường
-BOARD_MIN_OUT_SIZE = 80           # kích thước tối thiểu ảnh cắt (px, ở ảnh phân tích)
+BOARD_MIN_OUT_PX = 100            # cạnh ngắn tối thiểu của ảnh cắt ở độ phân giải gốc
 BOARD_MAX_OUT_ASPECT = 1.25 / BOARD_MIN_ASPECT
-BOARD_MIN_FILL = 0.75             # tỉ lệ ảnh cắt thuộc PCB (còn lại là nền/đệm)
+BOARD_MIN_FILL = 0.60             # ngưỡng thấp để chấp nhận PCB có nền/biên khó phân đoạn
 BOARD_AUTO_LANDSCAPE = True       # ảnh cắt luôn nằm ngang (False nếu ảnh reference đặt dọc)
-BOARD_CANNY_SIGMA = 0.33
-BOARD_CLAHE_CLIP = 2.0
+BOARD_BG_BAND = 0.05              # dải viền để ước lượng nền, PCB phải nằm trọn trong ảnh
+BOARD_EDGE_BG_MULT = 1.3
+BOARD_EDGE_MIN_LO = 16
+BOARD_EDGE_HI_RATIO = 2.0
+BOARD_SEG_K = 4.0
+BOARD_SEG_MIN_DIFF = 14
+BOARD_SEG_CLOSE = 15
 BOARD_CLOSE_KERNEL = 5
 BOARD_CLOSE_ITER = 2
+BOARD_CANNY_KERNEL = 3
 SHOW_BOARD_EDGES = False          # True: hiện thêm cửa sổ Edges để chỉnh ngưỡng
+DETECT_ONLY = False               # True hoặc --detect-only: xem crop, không nạp YOLO
+BOARD_DEBUG_DIR = "debug"
+SHOW_CROP_PREVIEW = True          # luôn xem đúng ảnh PCB sẽ đưa vào YOLO
 
 # ---- Hiển thị ----
 WINDOW_LIVE = "PCB Camera"
@@ -167,60 +194,296 @@ def normalize_component_class(class_name):
 # 2. ĐỌC CAMERA Ở LUỒNG RIÊNG
 # ============================================================
 
-
 class CameraStream:
-    """Nhận ảnh từ camera Hikvision thông qua camera_viewer.py."""
+    """Luôn đọc frame mới nhất trong nền, tự kết nối lại khi mất hình."""
 
-    def __init__(self, source=None):
-        self.viewer = HikCameraViewer(
-            default_exposure_us=20000.0
-        )
+    def __init__(self, source):
+        self.source = source
+        self.cap = self._open()
+        self.lock = threading.Lock()
+        self.frame = None
+        self.frame_id = 0
+        self.stop_event = threading.Event()
+        self.thread = None
 
-        print("[INFO] Đang kết nối camera Hikvision...")
+        if self.cap.isOpened():
+            self.thread = threading.Thread(target=self._loop, daemon=True)
+            self.thread.start()
 
-        if not self.viewer.connect():
-            self.viewer.stop()
-            raise RuntimeError("Không kết nối được camera Hikvision.")
-
-        if not self.viewer.start_stream():
-            self.viewer.stop()
-            raise RuntimeError("Không khởi động được luồng ảnh.")
-
-        print(f"[INFO] Đã kết nối: {self.viewer.device_name}")
+    def _open(self):
+        cap = cv2.VideoCapture(self.source)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
 
     def is_opened(self):
-        return (
-            self.viewer.is_connected
-            and self.viewer.is_grabbing
-        )
+        return self.cap.isOpened()
+
+    def _loop(self):
+        last_ok = time.monotonic()
+        while not self.stop_event.is_set():
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                last_ok = time.monotonic()
+                # cap.read() luôn cấp mảng mới nên không cần copy
+                with self.lock:
+                    self.frame = frame
+                    self.frame_id += 1
+                continue
+
+            if time.monotonic() - last_ok > CAMERA_RECONNECT_AFTER_SECONDS:
+                print("[WARN] Mất tín hiệu camera, đang kết nối lại...", flush=True)
+                self.cap.release()
+                self.cap = self._open()
+                last_ok = time.monotonic()
+            else:
+                self.stop_event.wait(0.02)
 
     def read(self):
-        with self.viewer.frame_lock:
-            frame = self.viewer.latest_frame
-            frame_id = self.viewer.frame_count
-
-            if frame is not None:
-                frame = frame.copy()
-
-        return frame, frame_id
+        with self.lock:
+            return self.frame, self.frame_id
 
     def wait_for_frame(self, timeout_seconds):
         deadline = time.monotonic() + timeout_seconds
-
         while time.monotonic() < deadline:
-            frame, _ = self.read()
-
-            if frame is not None:
+            if self.read()[0] is not None:
                 return True
-
             time.sleep(0.02)
-
         return False
 
     def stop(self):
-        if self.viewer is not None:
-            self.viewer.stop()
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+        self.cap.release()
 
+
+# ============================================================
+# 2b. CAMERA CÔNG NGHIỆP HIKVISION (TỰ ĐỘNG MỞ)
+# ============================================================
+
+def _load_hik_sdk():
+    """Nạp Hikvision MvImport. Trả về (MvCameraControl_class, PixelType_header)
+    hoặc (None, None) nếu không có SDK. Không dùng `import *` để không làm bẩn namespace."""
+    import importlib
+
+    for path in HIK_MVIMPORT_PATHS:
+        if path and Path(path).is_dir() and path not in sys.path:
+            sys.path.append(path)
+    try:
+        return (importlib.import_module("MvCameraControl_class"),
+                importlib.import_module("PixelType_header"))
+    except ImportError as e:
+        print(f"[WARN] Không nạp được Hikvision SDK (MvImport): {e}", flush=True)
+        return None, None
+
+
+class HikCameraStream:
+    """Camera Hikvision đọc ở luồng riêng, cùng giao diện với CameraStream:
+    read(), wait_for_frame(), is_opened(), stop(). Thêm set_exposure()."""
+
+    def __init__(self, exposure_us=HIK_EXPOSURE_US):
+        self.exposure_us = float(exposure_us)
+        self.exp_min, self.exp_max = 34.0, 1999733.0
+        self.device_name = "Hikvision Camera"
+        self.sdk = self.pixel = None
+        self.cam = None
+        self.lock = threading.Lock()
+        self.frame = None
+        self.frame_id = 0
+        self.stop_event = threading.Event()
+        self.thread = None
+        self._sdk_ready = False
+        self._grabbing = False
+        self._opened = False
+
+        try:
+            self._opened = self._connect() and self._start()
+        except Exception as e:
+            print(f"[WARN] Lỗi khi mở camera Hikvision: {e}", flush=True)
+        if not self._opened:
+            self._release()          # dọn phần mở dở
+
+    # ---------------------------------------------------------- kết nối
+    def _connect(self):
+        sdk, pixel = _load_hik_sdk()
+        if sdk is None:
+            return False
+        self.sdk, self.pixel = sdk, pixel
+
+        ret = sdk.MvCamera.MV_CC_Initialize()
+        if ret != 0:
+            print(f"[WARN] MV_CC_Initialize thất bại: 0x{ret:x}", flush=True)
+            return False
+        self._sdk_ready = True
+
+        devices = sdk.MV_CC_DEVICE_INFO_LIST()
+        ret = sdk.MvCamera.MV_CC_EnumDevices(sdk.MV_GIGE_DEVICE | sdk.MV_USB_DEVICE, devices)
+        if ret != 0 or devices.nDeviceNum == 0:
+            print("[WARN] Không tìm thấy camera Hikvision nào được kết nối.", flush=True)
+            return False
+
+        info = cast(devices.pDeviceInfo[0], POINTER(sdk.MV_CC_DEVICE_INFO)).contents
+        if info.nTLayerType == sdk.MV_GIGE_DEVICE:
+            raw_name = info.SpecialInfo.stGigEInfo.chModelName
+        else:
+            raw_name = info.SpecialInfo.stUsb3VInfo.chModelName
+        self.device_name = (bytes(raw_name).split(b"\x00")[0]
+                            .decode("ascii", errors="ignore").strip() or self.device_name)
+
+        self.cam = sdk.MvCamera()
+        ret = self.cam.MV_CC_CreateHandle(info)
+        if ret != 0:
+            print(f"[WARN] MV_CC_CreateHandle thất bại: 0x{ret:x}", flush=True)
+            return False
+        ret = self.cam.MV_CC_OpenDevice(sdk.MV_ACCESS_Exclusive, 0)
+        if ret != 0:
+            print(f"[WARN] MV_CC_OpenDevice thất bại: 0x{ret:x} "
+                  "(camera có thể đang được chương trình khác mở, ví dụ MVS)", flush=True)
+            return False
+
+        if info.nTLayerType == sdk.MV_GIGE_DEVICE:            # tối ưu gói GigE
+            packet = self.cam.MV_CC_GetOptimalPacketSize()
+            if packet > 0:
+                self.cam.MV_CC_SetIntValue("GevSCPSPacketSize", packet)
+
+        limits = sdk.MVCC_FLOATVALUE()
+        if self.cam.MV_CC_GetFloatValue("ExposureTime", limits) == 0:
+            self.exp_min, self.exp_max = limits.fMin, limits.fMax
+
+        self.cam.MV_CC_SetEnumValue("ExposureAuto", 0)        # 0: tắt tự động
+        self.set_exposure(self.exposure_us)
+        return True
+
+    def _start(self):
+        ret = self.cam.MV_CC_StartGrabbing()
+        if ret != 0:
+            print(f"[WARN] MV_CC_StartGrabbing thất bại: 0x{ret:x}", flush=True)
+            return False
+        self._grabbing = True
+        self.thread = threading.Thread(target=self._grab_worker, daemon=True)
+        self.thread.start()
+        return True
+
+    # ---------------------------------------------------------- phơi sáng
+    def set_exposure(self, exposure_us):
+        if self.cam is None:
+            return False
+        clamped = max(self.exp_min, min(self.exp_max, float(exposure_us)))
+        ret = self.cam.MV_CC_SetFloatValue("ExposureTime", clamped)
+        if ret != 0:
+            print(f"[WARN] Không đặt được ExposureTime {clamped:.0f} µs: 0x{ret:x}", flush=True)
+            return False
+        self.exposure_us = clamped
+        print(f"[Camera] ExposureTime: {clamped:.0f} µs ({clamped / 1000:.1f} ms)", flush=True)
+        return True
+
+    # ---------------------------------------------------------- luồng ảnh
+    def _grab_worker(self):
+        sdk, pixel = self.sdk, self.pixel
+        st_out = sdk.MV_FRAME_OUT()
+        memset(byref(st_out), 0, sizeof(st_out))
+        bgr_buf, bgr_size = None, 0
+
+        while not self.stop_event.is_set():
+            # timeout phải dài hơn thời gian phơi sáng
+            timeout_ms = int(max(2000, self.exposure_us / 1000.0 * 2 + 500))
+            ret = self.cam.MV_CC_GetImageBuffer(st_out, timeout_ms)
+            if ret != 0 or not st_out.pBufAddr:
+                self.stop_event.wait(0.01)
+                continue
+
+            image = None
+            try:
+                finfo = st_out.stFrameInfo
+                w, h = finfo.nWidth, finfo.nHeight
+                if finfo.enPixelType == pixel.PixelType_Gvsp_Mono8:
+                    mono = np.frombuffer(string_at(st_out.pBufAddr, finfo.nFrameLen),
+                                         dtype=np.uint8).reshape((h, w))
+                    image = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
+                else:                                   # Bayer, RGB... -> BGR bằng SDK
+                    needed = w * h * 3
+                    if bgr_buf is None or bgr_size != needed:
+                        bgr_buf, bgr_size = (c_ubyte * needed)(), needed
+                    param = sdk.MV_CC_PIXEL_CONVERT_PARAM_EX()
+                    memset(byref(param), 0, sizeof(param))
+                    param.nWidth, param.nHeight = w, h
+                    param.pSrcData = st_out.pBufAddr
+                    param.nSrcDataLen = finfo.nFrameLen
+                    param.enSrcPixelType = finfo.enPixelType
+                    param.enDstPixelType = pixel.PixelType_Gvsp_BGR8_Packed
+                    param.pDstBuffer = bgr_buf
+                    param.nDstBufferSize = needed
+                    if self.cam.MV_CC_ConvertPixelTypeEx(param) == 0:
+                        image = np.frombuffer(string_at(bgr_buf, needed),
+                                              dtype=np.uint8).reshape((h, w, 3))
+            except Exception as e:
+                print(f"[WARN] Lỗi giải mã frame Hikvision: {e}", flush=True)
+            finally:
+                self.cam.MV_CC_FreeImageBuffer(st_out)
+
+            if image is not None:
+                with self.lock:                          # mỗi frame là mảng mới
+                    self.frame = image
+                    self.frame_id += 1
+
+    # ---------------------------------------------------------- giao diện chung
+    def is_opened(self):
+        return self._opened
+
+    def read(self):
+        with self.lock:
+            return self.frame, self.frame_id
+
+    def wait_for_frame(self, timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self.read()[0] is not None:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def _release(self):
+        if self.cam is not None:
+            if self._grabbing:
+                self.cam.MV_CC_StopGrabbing()
+                self._grabbing = False
+            self.cam.MV_CC_CloseDevice()
+            self.cam.MV_CC_DestroyHandle()
+            self.cam = None
+        if self._sdk_ready:
+            self.sdk.MvCamera.MV_CC_Finalize()
+            self._sdk_ready = False
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=3.0)
+        self._release()
+
+
+def open_camera():
+    """Tự động mở camera. Trả về (stream, nhãn). Hikvision trước, dự phòng SOURCE."""
+    backend = CAMERA_BACKEND.strip().lower()
+
+    if backend in ("auto", "hikvision", "hik"):
+        print("[INFO] Đang tìm camera Hikvision...", flush=True)
+        hik = HikCameraStream()
+        if hik.is_opened():
+            print(f"[INFO] Đã mở camera Hikvision: {hik.device_name}", flush=True)
+            return hik, f"Hikvision {hik.device_name}"
+        hik.stop()
+        if backend != "auto":
+            raise RuntimeError(
+                "\nKhông mở được camera Hikvision.\n\n"
+                "Kiểm tra:\n"
+                "1. Camera đã cấp nguồn và nối cáp (GigE/USB).\n"
+                "2. Đã cài MVS và có thư mục Python/MvImport (hoặc đặt biến HIK_MVIMPORT_PATH).\n"
+                "3. Không có chương trình khác (MVS, camera_viewer.py) đang giữ camera.\n"
+                "4. Muốn dùng camera khác, đặt CAMERA_BACKEND = \"ip\" hoặc \"auto\"."
+            )
+        print(f"[INFO] Không có camera Hikvision, chuyển sang SOURCE = {SOURCE}", flush=True)
+
+    return CameraStream(SOURCE), f"SOURCE = {SOURCE}"
 
 
 # ============================================================
@@ -419,6 +682,12 @@ def _check_inside(contour, quad, shape, m):
 
 
 def _hull_to_quad(hull, solidity, rectangularity):
+    if (solidity >= BOARD_MINRECT_SOLIDITY
+            and rectangularity >= BOARD_MINRECT_RECTANGULARITY):
+        quad = order_points(cv2.boxPoints(cv2.minAreaRect(hull)))
+        if _valid_quad(quad):
+            return quad
+
     peri = cv2.arcLength(hull, True)
     for eps in BOARD_APPROX_EPS:
         approx = cv2.approxPolyDP(hull, eps * peri, True)
@@ -426,49 +695,109 @@ def _hull_to_quad(hull, solidity, rectangularity):
             q = order_points(approx)
             if _valid_quad(q):
                 return q
-    # minAreaRect chỉ khi contour gần như là hình chữ nhật thật
-    if (solidity >= BOARD_MINRECT_SOLIDITY
-            and rectangularity >= BOARD_MINRECT_RECTANGULARITY):
-        q = order_points(cv2.boxPoints(cv2.minAreaRect(hull)))
-        if _valid_quad(q):
-            return q
     return None
 
 
-def _evaluate_contour(c, frame_area):
+def _touches_border(contour, shape, margin):
+    h, w = shape[:2]
+    points = contour.reshape(-1, 2)
+    return bool(np.any(
+        (points[:, 0] <= margin) | (points[:, 1] <= margin)
+        | (points[:, 0] >= w - 1 - margin)
+        | (points[:, 1] >= h - 1 - margin)
+    ))
+
+
+def _evaluate_contour(c, shape):
+    frame_area = shape[0] * shape[1]
     area = cv2.contourArea(c)
-    if not (BOARD_MIN_AREA_RATIO * frame_area <= area
-            <= BOARD_MAX_AREA_RATIO * frame_area):
-        return None
+    if area < BOARD_MIN_AREA_RATIO * frame_area:
+        return "small"
+    if area > BOARD_MAX_AREA_RATIO * frame_area:
+        return "large"
+    if _touches_border(c, shape, BOARD_BORDER_MARGIN):
+        return "border"
     hull = cv2.convexHull(c)
     hull_area = cv2.contourArea(hull)
     if hull_area <= 0:
-        return None
+        return "solid"
     solidity = area / hull_area
     if solidity < BOARD_MIN_SOLIDITY:
-        return None
+        return "solid"
     (_, _), (rw, rh), _ = cv2.minAreaRect(hull)
     if rw * rh <= 0:
-        return None
+        return "rect"
     rectangularity = hull_area / (rw * rh)
-    if (rectangularity < BOARD_MIN_RECTANGULARITY
-            or min(rw, rh) / max(rw, rh) < BOARD_MIN_ASPECT):
-        return None
+    if rectangularity < BOARD_MIN_RECTANGULARITY:
+        return "rect"
+    if min(rw, rh) / max(rw, rh) < BOARD_MIN_ASPECT:
+        return "aspect"
     quad = _hull_to_quad(hull, solidity, rectangularity)
     if quad is None:
-        return None
+        return "quad"
+    if _check_inside(c, quad, shape, BOARD_BORDER_MARGIN):
+        return "border"
     return area * solidity * rectangularity, quad
 
 
-def _find_pcb(edges, shape):
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    frame_area = shape[0] * shape[1]
-    best = None
-    for c in contours:
-        r = _evaluate_contour(c, frame_area)
-        if r and (best is None or r[0] > best[0]):
-            best = (r[0], c, r[1])
-    return (best[1], best[2]) if best else None
+def _best_candidate(masks, shape):
+    best, rejects = None, Counter()
+    for source, binary in masks:
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:12]
+        for contour in contours:
+            result = _evaluate_contour(contour, shape)
+            if isinstance(result, str):
+                rejects[result] += 1
+                continue
+            if best is None or result[0] > best[0]:
+                best = (result[0], contour, result[1], source)
+    return best, rejects
+
+
+def _basis(shape):
+    h, w = shape[:2]
+    x = np.linspace(-1, 1, w, dtype=np.float32)[None, :].repeat(h, axis=0)
+    y = np.linspace(-1, 1, h, dtype=np.float32)[:, None].repeat(w, axis=1)
+    return np.stack([np.ones_like(x), x, y, x * y, x * x, y * y], axis=-1)
+
+
+def _border_band(shape, fraction):
+    h, w = shape[:2]
+    band_h, band_w = max(3, int(h * fraction)), max(3, int(w * fraction))
+    band = np.zeros((h, w), dtype=bool)
+    band[:band_h] = band[-band_h:] = True
+    band[:, :band_w] = band[:, -band_w:] = True
+    return band
+
+
+def _fit_background(gray, basis, band):
+    """Mô hình hóa nền không đồng đều từ dải viền và loại điểm ngoại lai."""
+    step = 4
+    sampled_band = band[::step, ::step]
+    features = basis[::step, ::step][sampled_band]
+    values = gray[::step, ::step][sampled_band].astype(np.float32)
+    if len(values) < 50:
+        features = basis[band]
+        values = gray[band].astype(np.float32)
+    keep = np.ones(len(values), dtype=bool)
+    sigma = 1.0
+    for _ in range(3):
+        coefficients = np.linalg.lstsq(features[keep], values[keep], rcond=None)[0]
+        residual = values - features @ coefficients
+        inlier_residual = residual[keep]
+        sigma = float(
+            1.4826 * np.median(
+                np.abs(inlier_residual - np.median(inlier_residual))
+            ) + 1e-3
+        )
+        updated_keep = np.abs(residual) < 3.0 * sigma
+        if updated_keep.sum() < 50:
+            break
+        keep = updated_keep
+    return basis @ coefficients, sigma
 
 
 def _fill_ratio(contour, corners, shape):
@@ -485,12 +814,13 @@ def _fill_ratio(contour, corners, shape):
     return float(cv2.warpPerspective(mask, M, (w, h)).mean() / 255.0)
 
 
-def _check_output_size(corners):
-    tl, tr, br, bl = corners
+def _check_output_size(frame_corners):
+    """Kiểm tra kích thước crop ở độ phân giải gốc, không ở ảnh phân tích."""
+    tl, tr, br, bl = frame_corners
     w = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
     h = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
-    if min(w, h) < BOARD_MIN_OUT_SIZE:
-        return "Anh cat qua nho"
+    if min(w, h) < BOARD_MIN_OUT_PX:
+        return f"Anh cat qua nho ({min(w, h)}px)"
     if max(w, h) / min(w, h) > BOARD_MAX_OUT_ASPECT:
         return "Ti le anh cat bat thuong"
     return None
@@ -559,60 +889,122 @@ class BoardDetector:
 
     def __init__(self):
         self.tracker = CornerTracker()
-        self.clahe = cv2.createCLAHE(clipLimit=BOARD_CLAHE_CLIP, tileGridSize=(8, 8))
-        k = BOARD_CLOSE_KERNEL if BOARD_CLOSE_KERNEL % 2 else BOARD_CLOSE_KERNEL + 1
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        self.close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (BOARD_CLOSE_KERNEL, BOARD_CLOSE_KERNEL)
+        )
+        k = BOARD_SEG_CLOSE | 1
+        self.seg_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        self.small_kernel = np.ones((3, 3), dtype=np.uint8)
+        self._shape = None
+        self._basis = None
+        self._band = None
 
-    def _edges(self, small):
-        gray = self.clahe.apply(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+    def _prepare_background(self, shape):
+        if self._shape != shape[:2]:
+            self._shape = shape[:2]
+            self._basis = _basis(shape)
+            self._band = _border_band(shape, BOARD_BG_BAND)
+
+    def _candidates(self, gray):
+        """Kết hợp nhiều ngưỡng biên và phân đoạn để chống đổi sáng/nền vân."""
+        self._prepare_background(gray.shape)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        v = np.median(blur)
-        lo = int(max(0, (1 - BOARD_CANNY_SIGMA) * v))
-        hi = int(min(255, (1 + BOARD_CANNY_SIGMA) * v))
-        edges = cv2.Canny(blur, lo, hi)
-        return cv2.morphologyEx(edges, cv2.MORPH_CLOSE, self.kernel,
-                                iterations=BOARD_CLOSE_ITER)
+
+        gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=3)
+        gradient = np.abs(gx) + np.abs(gy)
+        background_gradient = float(np.percentile(gradient[self._band], 75))
+        adaptive_low = int(np.clip(
+            0.5 * background_gradient, BOARD_EDGE_MIN_LO, 80
+        ))
+        canny_candidates = []
+        all_edges = np.zeros_like(gray)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (BOARD_CANNY_KERNEL, BOARD_CANNY_KERNEL)
+        )
+        thresholds = (
+            (adaptive_low, max(adaptive_low + 20, 2 * adaptive_low)),
+            (adaptive_low, max(adaptive_low + 20, 3 * adaptive_low)),
+            (int(1.5 * adaptive_low), max(adaptive_low + 20, 3 * adaptive_low)),
+        )
+        for low, high in thresholds:
+            edge_map = cv2.Canny(blur, low, min(high, 220))
+            edge_map = cv2.morphologyEx(
+                edge_map, cv2.MORPH_CLOSE, kernel, iterations=BOARD_CLOSE_ITER
+            )
+            all_edges = cv2.bitwise_or(all_edges, edge_map)
+            canny_candidates.append((f"canny_{low}_{high}", edge_map))
+
+        background, sigma = _fit_background(blur, self._basis, self._band)
+        difference = np.abs(blur.astype(np.float32) - background)
+        threshold = max(BOARD_SEG_MIN_DIFF, BOARD_SEG_K * sigma)
+        segmented = (difference > threshold).astype(np.uint8) * 255
+        segmented = cv2.morphologyEx(
+            segmented, cv2.MORPH_OPEN, self.small_kernel
+        )
+        segmented = cv2.morphologyEx(
+            segmented, cv2.MORPH_CLOSE, self.seg_close
+        )
+        contours, _ = cv2.findContours(
+            segmented, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        solid = np.zeros_like(segmented)
+        cv2.drawContours(solid, contours, -1, 255, cv2.FILLED)
+        info = {
+            "canny_thresholds": thresholds,
+            "background_gradient": background_gradient,
+            "background_sigma": sigma,
+            "segmentation_threshold": threshold,
+        }
+        return canny_candidates + [("background", solid)], all_edges, solid, info
 
     def update(self, frame):
         frame_h, frame_w = frame.shape[:2]
         det_w = BOARD_FRAME_WIDTH
         det_h = max(1, int(frame_h * det_w / frame_w))
-        small = cv2.resize(frame, (det_w, det_h))
-        edges = self._edges(small)
-        shape = small.shape
+        small = cv2.resize(frame, (det_w, det_h), interpolation=cv2.INTER_AREA)
+        gray = small if small.ndim == 2 else cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        shape = gray.shape
+        masks, edges, solid, info = self._candidates(gray)
+        candidate, rejects = _best_candidate(masks, shape)
 
         state = {"ready": False, "status": "", "raw_quad": None, "corners": None,
-                 "frame_corners": None, "det_size": (det_w, det_h), "edges": edges}
+                 "frame_corners": None, "det_size": (det_w, det_h), "edges": edges,
+                 "mask": solid, "source": None, "rejects": rejects, "info": info}
         blocked = detected_now = False
         contour = raw_quad = None
 
-        cand = _find_pcb(edges, shape)
-        if cand is None:
-            state["status"] = "Khong tim thay PCB hop le"
-        else:
-            contour, raw_quad = cand
-            reason = _check_inside(contour, raw_quad, shape, BOARD_BORDER_MARGIN)
-            if reason:                                   # PCB chưa nằm trọn -> không quét
-                state["status"] = reason + " - khong quet"
+        if candidate is None:
+            if rejects["border"]:
+                state["status"] = "PCB cham/vuot mep khung - khong quet"
                 blocked = True
                 self.tracker.reset()
-                raw_quad = None
             else:
-                detected_now = True
-                state["raw_quad"] = raw_quad
+                detail = ", ".join(
+                    f"{key}:{count}" for key, count in sorted(rejects.items())
+                )
+                state["status"] = "Khong tim thay PCB hop le" + (
+                    f" ({detail})" if detail else ""
+                )
+        else:
+            _, contour, raw_quad, source = candidate
+            detected_now = True
+            state["raw_quad"] = raw_quad
+            state["source"] = source
 
         stable = None if blocked else self.tracker.update(raw_quad)
 
         if stable is not None and detected_now:
             corners = _offset_quad(stable, _compute_pad(stable))          # góc ổn định
             raw_corners = _offset_quad(raw_quad, _compute_pad(raw_quad))  # góc thô, để kiểm tra
+            scale = np.array([frame_w / det_w, frame_h / det_h], dtype=np.float32)
             if not (_quad_ok(corners) and _quad_ok(raw_corners)):
                 state["status"] = "Goc sau khi dem khong hop le"
             elif not (_corners_inside(corners, shape)
                       and _corners_inside(raw_corners, shape)):
                 state["status"] = "Phan dem vuot ra ngoai khung"
             else:
-                err = _check_output_size(corners)
+                err = _check_output_size(corners * scale)
                 if err is None:
                     fill = _fill_ratio(contour, raw_corners, shape)
                     if fill < BOARD_MIN_FILL:
@@ -620,7 +1012,6 @@ class BoardDetector:
                 if err:
                     state["status"] = err
                 else:
-                    scale = np.array([frame_w / det_w, frame_h / det_h], dtype=np.float32)
                     state["ready"] = True
                     state["status"] = "San sang quet"
                     state["corners"] = corners
@@ -633,6 +1024,11 @@ class BoardDetector:
 def rectify_board(frame, corners):
     """Cắt PCB theo bốn góc (toạ độ khung hình gốc) và hiệu chỉnh phối cảnh.
     Trả về (ảnh cắt, ma trận khung hình -> ảnh cắt)."""
+    corners = np.asarray(corners, dtype=np.float32)
+    if (corners.shape != (4, 2) or not np.all(np.isfinite(corners))
+            or not _quad_ok(corners) or not _corners_inside(corners, frame.shape)):
+        return None, None
+
     top_left, top_right, bottom_right, bottom_left = corners
     width = int(max(np.linalg.norm(bottom_right - bottom_left),
                     np.linalg.norm(top_right - top_left)))
@@ -645,7 +1041,11 @@ def rectify_board(frame, corners):
         [0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1],
     ], dtype=np.float32)
     transform = cv2.getPerspectiveTransform(corners, destination)
+    if not np.all(np.isfinite(transform)):
+        return None, None
     board = cv2.warpPerspective(frame, transform, (width, height))
+    if board.size == 0:
+        return None, None
 
     if BOARD_AUTO_LANDSCAPE and height > width:          # luôn xuất ảnh nằm ngang
         board = cv2.rotate(board, cv2.ROTATE_90_CLOCKWISE)
@@ -669,6 +1069,32 @@ def draw_board_overlay(live, board, sx, sy):
         text, color = "PCB: " + board["status"], UI_COLORS["warning"]
     cv2.putText(live, text, (10, live.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, color, 2, cv2.LINE_AA)
+
+
+def dump_board_debug(frame, board):
+    """Lưu ảnh đầu vào và dữ liệu trung gian để chẩn đoán lỗi crop."""
+    folder = PROJECT_DIR / BOARD_DEBUG_DIR / time.strftime("board_%Y%m%d_%H%M%S")
+    folder.mkdir(parents=True, exist_ok=True)
+    images = {
+        "frame.png": frame,
+        "edges.png": board["edges"],
+        "mask.png": board["mask"],
+    }
+    for filename, image in images.items():
+        if not cv2.imwrite(str(folder / filename), image):
+            raise OSError(f"Không lưu được dữ liệu debug: {folder / filename}")
+
+    with (folder / "info.txt").open("w", encoding="utf-8") as debug_file:
+        debug_file.write(
+            f"frame_shape: {frame.shape}\n"
+            f"status: {board['status']}\n"
+            f"source: {board['source']}\n"
+            f"rejects: {board['rejects']}\n"
+        )
+        for key, value in board["info"].items():
+            formatted = f"{value:.2f}" if isinstance(value, (int, float)) else str(value)
+            debug_file.write(f"{key}: {formatted}\n")
+    return folder
 
 
 # ============================================================
@@ -1139,32 +1565,45 @@ class Scanner:
         self.lock = threading.Lock()
         self.busy = False
         self.result = None
+        self.error = None
 
     def start(self, frame, board_corners):
         with self.lock:
             if self.busy:
                 return False
             self.busy = True
-        # Frame không bị ghi đè (mỗi lần read là mảng mới) nên không cần copy.
-        threading.Thread(target=self._run, args=(frame, board_corners),
+            self.error = None
+        threading.Thread(target=self._run, args=(frame.copy(), board_corners.copy()),
                          daemon=True).start()
         return True
 
     def _run(self, frame, board_corners):
         result = None
+        error = None
         try:
             result = self.checker.scan(frame, board_corners)
         except Exception as e:
+            error = str(e)
             print(f"[ERROR] {e}", flush=True)
         finally:
             with self.lock:
                 self.result = result
+                self.error = error
                 self.busy = False
 
     def pop_result(self):
         with self.lock:
             result, self.result = self.result, None
         return result
+
+    def pop_error(self):
+        with self.lock:
+            error, self.error = self.error, None
+        return error
+
+    def is_busy(self):
+        with self.lock:
+            return self.busy
 
 
 def stable_status(history):
@@ -1182,51 +1621,75 @@ def stable_status(history):
 def main():
     os.system("")  # bật màu ANSI trên Windows terminal
 
-    reference_components = load_reference()["components"]
-    reference_counts = Counter(c["class"] for c in reference_components)
-    print("[INFO] PCB checker v5 - checks detected component positions against reference.",
-          flush=True)
-    print(f"[INFO] Linh kiện mạch gốc: {dict(reference_counts)}", flush=True)
+    detect_only = DETECT_ONLY or "--detect-only" in sys.argv
+    checker = None
+    if detect_only:
+        print("[INFO] --detect-only: chỉ xem phát hiện/crop PCB, không nạp YOLO.",
+              flush=True)
+    else:
+        if YOLO is None:
+            raise RuntimeError(
+                f"Thiếu thư viện YOLO/torch: {_IMPORT_ERROR}\n"
+                "Cài torch và ultralytics, hoặc chạy: python test.py --detect-only"
+            )
+        reference_components = load_reference()["components"]
+        reference_counts = Counter(c["class"] for c in reference_components)
+        print("[INFO] PCB checker v5 - checks detected component positions against reference.",
+              flush=True)
+        print(f"[INFO] Linh kiện mạch gốc: {dict(reference_counts)}", flush=True)
 
-    reference_image = load_reference_image()
-    model = YOLO(find_model())
-    checker = PCBChecker(model, reference_components, reference_image)
+        reference_image = load_reference_image()
+        model = YOLO(find_model())
+        checker = PCBChecker(model, reference_components, reference_image)
 
-    # Chạy thử YOLO 1 lần để lần quét đầu không bị khựng.
-    model.predict(
-        source=np.zeros((IMGSZ, IMGSZ, 3), dtype=np.uint8),
-        imgsz=IMGSZ, device=DEVICE, half=USE_CUDA, verbose=False,
-    )
+        # Chạy thử YOLO 1 lần để lần quét đầu không bị khựng.
+        model.predict(
+            source=np.zeros((IMGSZ, IMGSZ, 3), dtype=np.uint8),
+            imgsz=IMGSZ, device=DEVICE, half=USE_CUDA, verbose=False,
+        )
 
-    stream = CameraStream()
+    stream, camera_label = open_camera()      # tự động mở camera khi chạy chương trình
 
     if not stream.is_opened():
         stream.stop()
         raise RuntimeError(
             "\nKhông mở được camera.\n"
+            "Đã thử: camera Hikvision (không thấy) và "
             f"SOURCE = {SOURCE}\n\n"
             "Kiểm tra:\n"
-            "1. Điện thoại và máy tính cùng WiFi.\n"
-            "2. IP điện thoại còn đúng.\n"
-            "3. IP Webcam đang chạy.\n"
-            "4. Thử mở URL trên trình duyệt.\n"
-            "5. Nếu dùng webcam, SOURCE = 0."
+            "1. Camera Hikvision: nguồn, cáp, MVS/MvImport, không bị chương trình khác giữ.\n"
+            "2. IP Webcam: điện thoại và máy tính cùng WiFi, IP còn đúng, ứng dụng đang chạy.\n"
+            "3. Thử mở URL trên trình duyệt.\n"
+            "4. Nếu dùng webcam, SOURCE = 0."
         )
 
     if not stream.wait_for_frame(CAMERA_STARTUP_TIMEOUT_SECONDS):
         stream.stop()
         raise RuntimeError(
             "\nCamera đã mở nhưng không nhận được hình ảnh.\n"
-            f"SOURCE = {SOURCE}\n"
-            "Kiểm tra IP/URL, đảm bảo IP Webcam đang phát video và "
-            "điện thoại với máy tính cùng mạng."
+            f"Camera: {camera_label}\n"
+            "Kiểm tra cáp/nguồn và thời gian lấy sáng (HIK_EXPOSURE_US) "
+            "hoặc IP/URL của IP Webcam."
         )
 
-    scanner = Scanner(checker)
+    has_exposure = hasattr(stream, "set_exposure")
+    exposure_steps = {ord("+"): 10000.0, ord("="): 10000.0, ord("-"): -10000.0,
+                      ord("_"): -10000.0, ord("]"): 50000.0, ord("["): -50000.0}
+    if detect_only:
+        hint_text = ("DETECT-ONLY | d: Debug | q: Thoat | +/-/[/]: Exp | r: Reset"
+                     if has_exposure else "DETECT-ONLY | d: Debug | q: Thoat")
+    else:
+        hint_text = ("s: Quet | d: Debug | q: Thoat | +/-/[/]: Exposure | r: Reset"
+                     if has_exposure else "s: Chup va nhan dien | d: Debug | q: Thoat")
+    print(f"[INFO] Camera: {camera_label}", flush=True)
+
+    scanner = Scanner(checker) if checker is not None else None
     board_detector = BoardDetector()
+    crop_open = False
     board = None
     history = deque(maxlen=max(1, SMOOTHING_WINDOW))
     last_status = None
+    scan_notice = None
     last_shown_id = -1
 
     try:
@@ -1239,10 +1702,11 @@ def main():
                 continue
 
             # ---------- NHẬN KẾT QUẢ ----------
-            result = scanner.pop_result()
+            result = scanner.pop_result() if scanner is not None else None
             if result is not None:
                 history.append(result["status"])
                 last_status = stable_status(history)
+                scan_notice = f"Scan xong: {STATUS_TEXT_IMAGE[last_status]}"
                 print(f"{ANSI[last_status]}{STATUS_TEXT_TERMINAL[last_status]}{ANSI_RESET}",
                       flush=True)
 
@@ -1250,14 +1714,21 @@ def main():
                     annotated = draw_status_overlay(result["annotated"], last_status)
                     cv2.imshow(WINDOW_RESULT, resize_for_display(annotated))
 
+            if scanner is not None:
+                scan_error = scanner.pop_error()
+                if scan_error:
+                    scan_notice = f"Loi nhan dien: {scan_error}"
+
             # ---------- VIDEO TRỰC TIẾP ----------
             if frame_id != last_shown_id:
                 last_shown_id = frame_id
 
                 # Phát hiện PCB trên frame này; phím s dùng đúng kết quả này
                 board = board_detector.update(frame)
-                if SHOW_BOARD_EDGES:
-                    cv2.imshow("Board Edges", board["edges"])
+                if SHOW_BOARD_EDGES or detect_only:
+                    debug_view = np.hstack([board["edges"], board["mask"]])
+                    cv2.imshow("Board Debug (edges | mask)",
+                               resize_for_display(debug_view))
 
                 live = resize_for_display(frame)
                 if live is frame:
@@ -1265,6 +1736,12 @@ def main():
                 draw_board_overlay(live, board,
                                    live.shape[1] / board["det_size"][0],
                                    live.shape[0] / board["det_size"][1])
+                if scanner is not None and scanner.is_busy():
+                    scan_notice = "Dang cat PCB va nhan dien YOLO..."
+                if scan_notice:
+                    cv2.putText(live, scan_notice[:100], (10, 86),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                                UI_COLORS["info"], 2, cv2.LINE_AA)
 
                 cv2.rectangle(live, (0, 0), (live.shape[1], 58),
                               UI_COLORS["background"], -1)
@@ -1275,9 +1752,23 @@ def main():
                     cv2.putText(live, f"Last: {STATUS_TEXT_IMAGE[last_status]}",
                                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                 STATUS_COLOR[last_status], 2, cv2.LINE_AA)
-                cv2.putText(live, "s: Chup va nhan dien | q: Thoat", (10, 52),
+                cv2.putText(live, hint_text, (10, 52),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, UI_COLORS["secondary"], 2,
                             cv2.LINE_AA)
+                if has_exposure:
+                    cv2.putText(live, f"Exp: {stream.exposure_us / 1000:.0f} ms",
+                                (live.shape[1] - 170, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, UI_COLORS["info"], 2, cv2.LINE_AA)
+
+                if detect_only or SHOW_CROP_PREVIEW:
+                    if board["ready"]:
+                        crop, _ = rectify_board(frame, board["frame_corners"])
+                        if crop is not None:
+                            cv2.imshow("PCB Crop", resize_for_display(crop))
+                            crop_open = True
+                    elif crop_open:
+                        cv2.destroyWindow("PCB Crop")
+                        crop_open = False
 
                 cv2.imshow(WINDOW_LIVE, live)
                 key = cv2.waitKey(1) & 0xFF
@@ -1286,12 +1777,28 @@ def main():
 
             if key == ord("q"):
                 break
-            if key in (ord("s"), ord("S")):
+            if has_exposure:                      # chỉnh thời gian lấy sáng (camera Hikvision)
+                if key in exposure_steps:
+                    stream.set_exposure(max(HIK_EXPOSURE_MIN_US,
+                                            stream.exposure_us + exposure_steps[key]))
+                elif key in (ord("r"), ord("R")):
+                    stream.set_exposure(HIK_EXPOSURE_US)
+            if key in (ord("d"), ord("D")) and board is not None:
+                folder = dump_board_debug(frame, board)
+                print(f"[INFO] Da luu du lieu debug phat hien PCB: {folder}", flush=True)
+            if key in (ord("s"), ord("S")) and detect_only:
+                print("[INFO] --detect-only: khong chay nhan dien YOLO.", flush=True)
+            elif key in (ord("s"), ord("S")):
                 if board is None or not board["ready"]:
                     reason = board["status"] if board else "chua co khung hinh"
                     print(f"[WARN] Khong quet: {reason}", flush=True)
-                elif scanner.start(frame, board["frame_corners"].copy()):
+                elif scanner is not None and scanner.start(
+                    frame, board["frame_corners"].copy()
+                ):
+                    scan_notice = "Dang cat PCB va nhan dien YOLO..."
                     print("[INFO] Da chup anh, dang cat PCB va nhan dien...", flush=True)
+                elif scanner is not None and scanner.is_busy():
+                    print("[INFO] Dang co lan quet chay; vui long cho ket qua.", flush=True)
     finally:
         stream.stop()
         cv2.destroyAllWindows()

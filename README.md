@@ -132,7 +132,7 @@ npm.cmd run dev
 
 ### Kết nối camera Hikvision trên giao diện web
 
-Backend phải chạy trên chính máy tính đã kết nối camera Hikvision. Cài Hikvision MVS để có SDK `MvCameraControl.dll`. Khi mở ứng dụng web, giao diện tự kết nối nguồn `hikvision`; không cần nhập nguồn hay nhấn nút kết nối. Backend dùng cùng SDK Hikvision và cách lấy ảnh như `camera_viewer.py`; không cần chạy đồng thời chương trình xem camera desktop. Webcam máy tính vẫn dùng chỉ số như `0`, còn camera IP có thể dùng URL luồng như trước.
+Backend phải chạy trên chính máy tính đã kết nối camera Hikvision. Cài Hikvision MVS để có SDK `MvCameraControl.dll`. Khi mở ứng dụng web, giao diện tự kết nối nguồn `hikvision`; không cần nhập nguồn hay nhấn nút kết nối. Khi quét, backend dùng `PCBMonoCropper` của `camera_viewer.py` để cắt/nắn PCB và xoay ảnh crop sang ngang trước khi phân tích. Giao diện chỉ hiển thị kết quả phân tích. Nếu thuật toán không tìm được bo mạch, pipeline cắt dự phòng hiện có vẫn được dùng. Thanh **Exposure time** trên trang Camera trực tiếp thay đổi thời gian phơi sáng theo ms trong giới hạn mà thiết bị báo về. Không chạy đồng thời chương trình xem camera desktop. Webcam máy tính vẫn dùng chỉ số như `0`, còn camera IP có thể dùng URL luồng như trước.
 
 ### Chạy giao diện đã build qua FastAPI
 
@@ -276,7 +276,9 @@ Inference sẽ dùng model thật và có thể mất thời gian tùy phần c�
 
 ## Chạy chương trình camera desktop
 
-`test.py` chạy cửa sổ OpenCV độc lập, không phải frontend web. Chương trình dùng model trong `backend\models\best.pt` nếu có, nếu không sẽ fallback về model ở thư mục gốc. Reference JSON được đọc từ `backend\storage\reference_components.json`.
+`test.py` chạy cửa sổ OpenCV độc lập, không phải frontend web. Chương trình dùng model trong `backend\models\best.pt` nếu có, nếu không sẽ fallback về model ở thư mục gốc. Reference JSON được đọc từ `backend\storage\reference_components.json`. `test1.py` là lối chạy tương thích, dùng chung mã nguồn và cách cắt với `test.py`.
+
+Trước khi nhận diện, chương trình kết hợp nhiều ngưỡng Canny thích nghi với phân đoạn nền; nền được ước lượng từ các điểm mẫu ở viền ảnh để giảm tải xử lý. Với contour gần chữ nhật, bộ cắt ưu tiên `minAreaRect` để tránh các chi tiết linh kiện làm lệch góc. Góc PCB được làm mượt và xác nhận qua 5 frame; kích thước crop được kiểm tra ở độ phân giải gốc. Khi camera Hikvision xử lý ảnh, YOLO chạy ở luồng nền để cửa sổ live vẫn cập nhật và báo trạng thái đang quét/lỗi. Chỉ crop hợp lệ mới được chuyển sang nhận diện.
 
 ```powershell
 cd D:\PCB_detection
@@ -284,7 +286,7 @@ $env:PCB_CAMERA_SOURCE = "0"
 python test.py
 ```
 
-Phím điều khiển phụ thuộc vào chương trình desktop; nhấn `s` để quét frame và `q` để thoát.
+Để căn chỉnh camera và kiểm tra khung cắt trước khi nạp YOLO, chạy `python test.py --detect-only` (hoặc `python test1.py --detect-only`). Cửa sổ `PCB Crop` luôn hiển thị crop đầu vào; chế độ `--detect-only` bổ sung cửa sổ debug biên/mask nhưng không nạp YOLO. Nhấn `d` để lưu frame, mask, biên và thông số vào `debug\`. Sau khi crop đã đúng, chạy bình thường; chờ trạng thái PCB sẵn sàng rồi nhấn `s` để quét, `q` để thoát. Với camera Hikvision, thời gian phơi sáng mặc định là 30 ms; có thể đổi bằng PowerShell trước khi chạy, ví dụ `$env:PCB_HIK_EXPOSURE_US = "50000"` để dùng 50 ms. Tăng phơi sáng nếu ảnh quá tối; giảm nếu PCB di chuyển bị nhòe. Webcam/IP camera không bị ảnh hưởng bởi thiết lập này.
 
 `machpcbgoc.py` tạo reference map bằng YOLO từ ảnh `2.jpg` và lưu dữ liệu/ảnh đã đánh dấu trong `backend\storage`:
 

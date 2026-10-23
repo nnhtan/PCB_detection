@@ -92,23 +92,33 @@ async def camera_snapshot(
     imgsz: int = Form(DEFAULT_IMGSZ),
     tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
 ):
-    camera_source: str | int
-    try:
-        camera_source = int(source)
-    except ValueError:
-        camera_source = source.strip()
-    capture = cv2.VideoCapture(camera_source)
-    try:
-        if not capture.isOpened():
+    if source.strip().lower() == "hikrobot":
+        frame, _, _ = get_camera(request).get_frame()
+        if frame is None:
             raise HTTPException(
                 status_code=400,
-                detail=f"Không kết nối được với camera nguồn: {camera_source}.",
+                detail="Camera Hikrobot chưa kết nối hoặc chưa nhận được khung hình.",
             )
-        ok, frame = capture.read()
-    finally:
-        capture.release()
-    if not ok or frame is None:
-        raise HTTPException(status_code=500, detail="Không nhận được frame từ camera.")
+    else:
+        camera_source: str | int
+        try:
+            camera_source = int(source)
+        except ValueError:
+            camera_source = source.strip()
+        capture = cv2.VideoCapture(camera_source)
+        try:
+            if not capture.isOpened():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Không kết nối được với camera nguồn: {camera_source}.",
+                )
+            ok, frame = capture.read()
+        finally:
+            capture.release()
+        if not ok or frame is None:
+            raise HTTPException(
+                status_code=500, detail="Không nhận được frame từ camera."
+            )
     result = await run_in_threadpool(
         run_inspection,
         get_pipeline(request),

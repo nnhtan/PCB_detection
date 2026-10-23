@@ -32,7 +32,9 @@ REFERENCE_IMAGE = str(
     else (PROJECT_DIR / "2.jpg")
 )
 
-# Camera điện thoại Android IP Webcam (hoặc SOURCE = 0 cho webcam máy tính)
+# Chọn Hikvision SDK hoặc OpenCV (webcam/IP stream).
+CAMERA_BACKEND = os.environ.get("PCB_CAMERA_BACKEND", "hikvision").strip().lower()
+# Nguồn này chỉ được dùng khi PCB_CAMERA_BACKEND=opencv.
 SOURCE_VALUE = os.environ.get(
     "PCB_CAMERA_SOURCE", "http://192.168.0.190:8080/video"
 )
@@ -48,8 +50,8 @@ SMOOTHING_WINDOW = 1
 CONTRAST_ALPHA = 1.15
 CONTRAST_BETA = -10
 
-# ---- YOLO (PHẢI GIỐNG machpcbgoc.py) ----
-CONF = 0.25
+# ---- YOLO (PHẢI GIỐNG machpcbgoc.py) ----git status
+
 IMGSZ = 1536
 MAX_DET = 1000
 USE_CUDA = torch.cuda.is_available()
@@ -142,20 +144,48 @@ def normalize_component_class(class_name):
 # ============================================================
 
 class CameraStream:
-    """Luôn đọc frame mới nhất trong nền, tự kết nối lại khi mất hình."""
+    """Đọc frame mới nhất từ Hikvision SDK hoặc nguồn OpenCV trong nền."""
 
-    def __init__(self, source):
+    def __init__(self, source, backend=CAMERA_BACKEND):
         self.source = source
-        self.cap = self._open()
+        self.backend = backend
+        self.cap = None
+        self.camera = None
         self.lock = threading.Lock()
         self.frame = None
         self.frame_id = 0
         self.stop_event = threading.Event()
         self.thread = None
 
-        if self.cap.isOpened():
+        if backend == "hikvision":
+            try:
+                from camera_viewer import HikCameraViewer
+            except SystemExit as error:
+                raise RuntimeError(
+                    "Không thể nạp Hikvision SDK. Kiểm tra MvImport và cài đặt MVS."
+                ) from error
+
+            self.camera = HikCameraViewer()
+            if not self.camera.connect():
+                self.camera.stop()
+                raise RuntimeError("Không kết nối được camera Hikvision.")
+            if not self.camera.start_stream():
+                self.camera.stop()
+                raise RuntimeError("Không khởi động được luồng camera Hikvision.")
+            print(f"[INFO] Đã kết nối camera Hikvision: {self.camera.device_name}",
+                  flush=True)
             self.thread = threading.Thread(target=self._loop, daemon=True)
             self.thread.start()
+        elif backend == "opencv":
+            self.cap = self._open()
+            if self.cap.isOpened():
+                self.thread = threading.Thread(target=self._loop, daemon=True)
+                self.thread.start()
+        else:
+            raise ValueError(
+                f"PCB_CAMERA_BACKEND không hợp lệ: {backend!r}. "
+                "Chọn 'hikvision' hoặc 'opencv'."
+            )
 
     def _open(self):
         cap = cv2.VideoCapture(self.source)
@@ -163,12 +193,37 @@ class CameraStream:
         return cap
 
     def is_opened(self):
-        return self.cap.isOpened()
+        if self.backend == "hikvision":
+            return self.camera.is_connected and self.camera.is_grabbing
+        return self.cap is not None and self.cap.isOpened()
+
+    def _read_frame(self):
+        if self.backend == "hikvision":
+            frame_id = self.camera.frame_count
+            if frame_id == self._last_camera_frame_id:
+                return None, False
+            self._last_camera_frame_id = frame_id
+            with self.camera.frame_lock:
+                frame = self.camera.latest_frame
+                return (frame.copy() if frame is not None else None), True
+        return self.cap.read()
 
     def _loop(self):
+        if self.backend == "hikvision":
+            self._last_camera_frame_id = 0
+            while not self.stop_event.is_set():
+                frame, is_new = self._read_frame()
+                if is_new and frame is not None:
+                    with self.lock:
+                        self.frame = frame
+                        self.frame_id += 1
+                else:
+                    self.stop_event.wait(0.01)
+            return
+
         last_ok = time.monotonic()
         while not self.stop_event.is_set():
-            ret, frame = self.cap.read()
+            ret, frame = self._read_frame()
             if ret and frame is not None:
                 last_ok = time.monotonic()
                 # cap.read() luôn cấp mảng mới nên không cần copy
@@ -201,7 +256,10 @@ class CameraStream:
         self.stop_event.set()
         if self.thread is not None:
             self.thread.join(timeout=1.0)
-        self.cap.release()
+        if self.camera is not None:
+            self.camera.stop()
+        if self.cap is not None:
+            self.cap.release()
 
 
 # ============================================================
@@ -337,7 +395,11 @@ def find_board_corners(frame):
         perimeter = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
         if len(approx) != 4 or not cv2.isContourConvex(approx):
-            continue
+            hull = cv2.convexHull(contour)
+            hull_perimeter = cv2.arcLength(hull, True)
+            approx = cv2.approxPolyDP(hull, 0.02 * hull_perimeter, True)
+            if len(approx) != 4 or not cv2.isContourConvex(approx):
+                continue
 
         corners = order_points(approx.reshape(4, 2))
         edge_lengths = np.linalg.norm(np.roll(corners, -1, axis=0) - corners, axis=1)
@@ -955,28 +1017,31 @@ def main():
         imgsz=IMGSZ, device=DEVICE, half=USE_CUDA, verbose=False,
     )
 
-    stream = CameraStream(SOURCE)
+    stream = CameraStream(SOURCE, CAMERA_BACKEND)
 
     if not stream.is_opened():
         stream.stop()
         raise RuntimeError(
             "\nKhông mở được camera.\n"
-            f"SOURCE = {SOURCE}\n\n"
+            f"Backend = {CAMERA_BACKEND}\nSOURCE = {SOURCE}\n\n"
             "Kiểm tra:\n"
-            "1. Điện thoại và máy tính cùng WiFi.\n"
-            "2. IP điện thoại còn đúng.\n"
-            "3. IP Webcam đang chạy.\n"
-            "4. Thử mở URL trên trình duyệt.\n"
-            "5. Nếu dùng webcam, SOURCE = 0."
+            "1. Camera Hikvision đã bật và MVS SDK được cài đặt.\n"
+            "2. Nếu dùng webcam/IP stream, đặt PCB_CAMERA_BACKEND=opencv.\n"
+            "3. Đặt PCB_CAMERA_SOURCE=0 hoặc URL stream tương ứng."
         )
 
     if not stream.wait_for_frame(CAMERA_STARTUP_TIMEOUT_SECONDS):
         stream.stop()
+        camera_troubleshooting = (
+            "Kiểm tra camera Hikvision, kết nối GigE/USB và MVS SDK."
+            if CAMERA_BACKEND == "hikvision"
+            else "Kiểm tra IP/URL, đảm bảo IP Webcam đang phát video và "
+                 "điện thoại với máy tính cùng mạng."
+        )
         raise RuntimeError(
             "\nCamera đã mở nhưng không nhận được hình ảnh.\n"
-            f"SOURCE = {SOURCE}\n"
-            "Kiểm tra IP/URL, đảm bảo IP Webcam đang phát video và "
-            "điện thoại với máy tính cùng mạng."
+            f"Backend = {CAMERA_BACKEND}\nSOURCE = {SOURCE}\n"
+            f"{camera_troubleshooting}"
         )
 
     scanner = Scanner(checker)
@@ -1018,12 +1083,18 @@ def main():
                 cv2.line(live, (0, 58), (live.shape[1], 58),
                          UI_COLORS["border"], 1, cv2.LINE_AA)
                 cv2.rectangle(live, (0, 0), (4, 58), UI_COLORS["primary"], -1)
+                camera_status = (
+                    f"Camera Hikvision: {stream.camera.device_name}"
+                    if stream.camera is not None
+                    else f"Camera OpenCV: {SOURCE}"
+                )
                 if last_status is not None:
-                    cv2.putText(live, f"Last: {STATUS_TEXT_IMAGE[last_status]}",
-                                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                                STATUS_COLOR[last_status], 2, cv2.LINE_AA)
+                    camera_status += f" | Last: {STATUS_TEXT_IMAGE[last_status]}"
+                cv2.putText(live, camera_status,
+                            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            UI_COLORS["text"], 1, cv2.LINE_AA)
                 cv2.putText(live, "s: Chup va nhan dien | q: Thoat", (10, 52),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, UI_COLORS["secondary"], 2,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, UI_COLORS["secondary"], 1,
                             cv2.LINE_AA)
 
                 cv2.imshow(WINDOW_LIVE, live)

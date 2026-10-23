@@ -15,7 +15,7 @@ export default function DetectPanel() {
   };
   return (
     <>
-      <PageHeader eyebrow="OBJECT DETECTION" title="Nhận diện linh kiện" description="Chạy YOLO độc lập để phát hiện và thống kê linh kiện trên một ảnh PCB." />
+      <PageHeader eyebrow="OBJECT DETECTION" title="Nhận diện linh kiện" description="Tự động cắt vùng bo mạch trước khi chạy YOLO để phát hiện và thống kê linh kiện." />
       <div className="panel-card">
         <div className="section-title"><div><h2><ScanSearch size={19} /> Quét ảnh bằng YOLO</h2><p>Chức năng nhận diện không cần mạch chuẩn</p></div></div>
         <div className="detect-grid">

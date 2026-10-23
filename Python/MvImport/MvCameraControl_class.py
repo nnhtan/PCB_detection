@@ -1,6 +1,7 @@
 # -- coding: utf-8 --
 
 import sys
+import os
 import copy
 import ctypes
 
@@ -11,8 +12,45 @@ from CameraParams_const import *
 from CameraParams_header import *
 from MvErrorDefine_const import *
 
-# Python3.8版本修改Dll加载策略, 默认不再搜索Path环境变量, 同时增加winmode参数以兼容旧版本
-dllname = "MvCameraControl.dll"
+# Python 3.8+ trên Windows yêu cầu thêm thư mục chứa DLL vào danh sách tìm kiếm (os.add_dll_directory)
+is_64bit = (ctypes.sizeof(ctypes.c_void_p) == 8)
+arch_folder = "Win64_x64" if is_64bit else "Win32_i86"
+
+candidate_dirs = []
+
+# 1. Biến môi trường GenICam / Gentl
+gentl_env = os.environ.get("GENICAM_GENTL64_PATH" if is_64bit else "GENICAM_GENTL32_PATH")
+if gentl_env and os.path.isdir(gentl_env):
+    candidate_dirs.append(gentl_env)
+
+# 2. Biến môi trường MVCAM_COMMON_RUNENV
+mvcam_env = os.environ.get("MVCAM_COMMON_RUNENV")
+if mvcam_env:
+    parent_env = os.path.dirname(mvcam_env)
+    candidate_dirs.append(os.path.join(parent_env, "Runtime", arch_folder))
+    candidate_dirs.append(os.path.join(os.path.dirname(parent_env), "Common Files", "MVS", "Runtime", arch_folder))
+
+# 3. Các đường dẫn cài đặt mặc định của Hikvision MVS
+candidate_dirs.extend([
+    rf"C:\Program Files (x86)\Common Files\MVS\Runtime\{arch_folder}",
+    rf"C:\Program Files\Common Files\MVS\Runtime\{arch_folder}",
+    rf"C:\Program Files (x86)\MVS\Runtime\{arch_folder}",
+    rf"C:\Program Files\MVS\Runtime\{arch_folder}",
+])
+
+full_dll_path = None
+for c_dir in candidate_dirs:
+    if os.path.isdir(c_dir):
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(c_dir)
+            except Exception:
+                pass
+        target_dll = os.path.join(c_dir, "MvCameraControl.dll")
+        if os.path.isfile(target_dll) and full_dll_path is None:
+            full_dll_path = target_dll
+
+dllname = full_dll_path if full_dll_path else "MvCameraControl.dll"
 if "winmode" in ctypes.WinDLL.__init__.__code__.co_varnames:
     MvCamCtrldll = WinDLL(dllname, winmode=0)
 else:

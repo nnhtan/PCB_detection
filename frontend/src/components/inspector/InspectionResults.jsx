@@ -7,6 +7,12 @@ const statusMeta = {
   UNALIGNED: { text: "ĐÃ QUÉT · CHƯA ĐỐI CHIẾU", className: "pending", icon: CircleAlert },
 };
 
+const cropLabels = {
+  perspective: "PCB đã cắt · YOLO · OpenCV",
+  roi: "PCB đã cắt · YOLO · OpenCV",
+  full: "Ảnh gốc · YOLO · OpenCV",
+};
+
 export default function InspectionResults({ result }) {
   if (!result) return null;
   const verdict = result.verdict || result.status;
@@ -28,7 +34,7 @@ export default function InspectionResults({ result }) {
       </div>
       {result.annotated_image && (
         <div className="result-image-card">
-          <div className="section-title"><div><h3>Kết quả phân tích</h3><p>Các vùng nhận diện được đánh dấu trên ảnh</p></div><span className="image-tag">YOLO · OpenCV</span></div>
+          <div className="section-title"><div><h3>Kết quả phân tích</h3><p>Các vùng nhận diện được đánh dấu trên ảnh</p></div><span className="image-tag">{cropLabels[result.crop_method] || "YOLO · OpenCV"}</span></div>
           <img className="result-image" src={result.annotated_image} alt="Ảnh PCB được chú thích kết quả" />
         </div>
       )}

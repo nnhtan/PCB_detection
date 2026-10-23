@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime
 from ctypes import *
 from pathlib import Path
@@ -36,9 +37,31 @@ except ImportError:
 
 # Đường dẫn đến module MvImport của Hikvision SDK
 CURRENT_DIR = Path(__file__).resolve().parent
+CAMERA_VIEWER_STREAM_HOST = "127.0.0.1"
+CAMERA_VIEWER_STREAM_PORT = int(os.environ.get("PCB_CAMERA_VIEWER_PORT", "8765"))
 MV_IMPORT_PATH = CURRENT_DIR / "Python" / "MvImport"
 if not MV_IMPORT_PATH.exists():
     MV_IMPORT_PATH = CURRENT_DIR.parent / "Python" / "MvImport"
+
+# Đảm bảo Windows và Python 3.8+ tìm thấy MvCameraControl.dll và các DLL phụ thuộc
+for _dll_env in ["GENICAM_GENTL64_PATH", "MVCAM_COMMON_RUNENV"]:
+    _p = os.environ.get(_dll_env)
+    if _p and hasattr(os, "add_dll_directory") and os.path.isdir(_p):
+        try:
+            os.add_dll_directory(_p)
+        except Exception:
+            pass
+
+for _def_p in [
+    r"C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64",
+    r"C:\Program Files\Common Files\MVS\Runtime\Win64_x64",
+    r"C:\Program Files (x86)\Common Files\MVS\Runtime\Win32_i86",
+]:
+    if hasattr(os, "add_dll_directory") and os.path.isdir(_def_p):
+        try:
+            os.add_dll_directory(_def_p)
+        except Exception:
+            pass
 
 sys.path.append(str(MV_IMPORT_PATH))
 
@@ -46,9 +69,9 @@ try:
     from MvCameraControl_class import *
     from PixelType_header import *
 except ImportError as e:
-    print(f"[LỖI] Không thể nạp Hikvision SDK (MvImport) từ: {MV_IMPORT_PATH}")
-    print(f"Chi tiết: {e}")
-    sys.exit(1)
+    raise ImportError(
+        f"Không thể nạp Hikrobot SDK (MvImport) từ {MV_IMPORT_PATH}: {e}"
+    ) from e
 
 
 class HikCameraViewer:
@@ -95,6 +118,57 @@ class HikCameraViewer:
         self.toast_msg = msg
         self.toast_time = time.time() + duration
 
+    def _discover_gige_direct(self):
+        """Tự động quét tìm camera GigE qua broadcast UDP (port 3956) khi SDK enum bị chặn"""
+        import socket
+        import subprocess
+        import re
+
+        packet = bytes([0x42, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01])
+        try:
+            output = subprocess.check_output('ipconfig', text=True, stderr=subprocess.DEVNULL)
+            local_ips = re.findall(r'IPv4 Address[.\s]*:\s*([0-9.]+)', output)
+        except Exception:
+            local_ips = []
+        if not local_ips:
+            local_ips = ["0.0.0.0"]
+
+        for nic_ip in local_ips:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.settimeout(0.5)
+                sock.bind((nic_ip, 0))
+                sock.sendto(packet, ('255.255.255.255', 3956))
+                data, addr = sock.recvfrom(2048)
+                sock.close()
+                if len(data) >= 100:
+                    cam_ip = addr[0]
+                    # Parse model name từ buffer
+                    model_bytes = data[108:140].split(b'\x00')[0]
+                    model_name = model_bytes.decode('latin1', errors='ignore').strip() or "Hikvision GigE Camera"
+                    print(f"      [GVCP Direct Discovery] Phát hiện camera {model_name} tại IP {cam_ip} (qua NIC {nic_ip})")
+
+                    st_dev_info = MV_CC_DEVICE_INFO()
+                    st_gige_dev = MV_GIGE_DEVICE_INFO()
+
+                    def _ip_to_int(ip_s):
+                        p = list(map(int, ip_s.split('.')))
+                        return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]
+
+                    st_gige_dev.nCurrentIp = _ip_to_int(cam_ip)
+                    st_gige_dev.nNetExport = _ip_to_int(nic_ip)
+                    for idx, char_code in enumerate(model_name.encode('ascii', errors='ignore')[:31]):
+                        st_gige_dev.chModelName[idx] = char_code
+
+                    st_dev_info.nTLayerType = MV_GIGE_DEVICE
+                    st_dev_info.SpecialInfo.stGigEInfo = st_gige_dev
+                    self.device_name = model_name
+                    return st_dev_info
+            except Exception:
+                pass
+        return None
+
     def connect(self):
         """Khởi tạo SDK và kết nối tới camera đầu tiên tìm thấy"""
         print("[1/4] Đang khởi tạo Hikvision SDK...")
@@ -106,22 +180,26 @@ class HikCameraViewer:
         device_list = MV_CC_DEVICE_INFO_LIST()
         tlayer_type = MV_GIGE_DEVICE | MV_USB_DEVICE
         ret = MvCamera.MV_CC_EnumDevices(tlayer_type, device_list)
-        if ret != 0 or device_list.nDeviceNum == 0:
+
+        st_device = None
+        if ret == 0 and device_list.nDeviceNum > 0:
+            print(f"[2/4] Tìm thấy {device_list.nDeviceNum} thiết bị qua SDK EnumDevices.")
+            st_device = cast(device_list.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
+            if st_device.nTLayerType == MV_GIGE_DEVICE:
+                model_bytes = bytes(st_device.SpecialInfo.stGigEInfo.chModelName).split(b'\x00')[0]
+                self.device_name = model_bytes.decode('ascii', errors='ignore').strip()
+            elif st_device.nTLayerType == MV_USB_DEVICE:
+                model_bytes = bytes(st_device.SpecialInfo.stUsb3VInfo.chModelName).split(b'\x00')[0]
+                self.device_name = model_bytes.decode('ascii', errors='ignore').strip()
+        else:
+            print("[THÔNG BÁO] SDK EnumDevices chưa tìm thấy thiết bị, đang quét trực tiếp cổng mạng GigE...")
+            st_device = self._discover_gige_direct()
+
+        if st_device is None:
             print("[LỖI] Không tìm thấy camera Hikvision nào được kết nối!")
             return False
 
-        print(f"[2/4] Tìm thấy {device_list.nDeviceNum} thiết bị. Đang kết nối camera đầu tiên...")
-        st_device = cast(device_list.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
-
-        # Lấy tên Model thiết bị
-        if st_device.nTLayerType == MV_GIGE_DEVICE:
-            model_bytes = bytes(st_device.SpecialInfo.stGigEInfo.chModelName).split(b'\x00')[0]
-            self.device_name = model_bytes.decode('ascii', errors='ignore').strip()
-        elif st_device.nTLayerType == MV_USB_DEVICE:
-            model_bytes = bytes(st_device.SpecialInfo.stUsb3VInfo.chModelName).split(b'\x00')[0]
-            self.device_name = model_bytes.decode('ascii', errors='ignore').strip()
-
-        print(f"      -> Model: {self.device_name}")
+        print(f"[2/4] Đang kết nối camera: {self.device_name}...")
 
         self.cam = MvCamera()
         ret = self.cam.MV_CC_CreateHandle(st_device)
@@ -316,6 +394,75 @@ class HikCameraViewer:
         self.is_grabbing = False
         print("[HOÀN TẤT] Camera đã đóng an toàn.")
 
+    def _start_web_stream(self):
+        viewer = self
+
+        class StreamServer(ThreadingHTTPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        class StreamHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/stream":
+                    self.send_error(404)
+                    return
+
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type",
+                    "multipart/x-mixed-replace; boundary=frame",
+                )
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+                while not viewer.exit_event.is_set():
+                    with viewer.frame_lock:
+                        frame = (
+                            viewer.latest_frame.copy()
+                            if viewer.latest_frame is not None
+                            else None
+                        )
+                    if frame is None:
+                        time.sleep(0.02)
+                        continue
+
+                    encoded, buffer = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
+                    )
+                    if not encoded:
+                        time.sleep(0.02)
+                        continue
+
+                    try:
+                        self.wfile.write(
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n\r\n"
+                            + buffer.tobytes()
+                            + b"\r\n"
+                        )
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
+                    time.sleep(0.03)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = StreamServer(
+            (CAMERA_VIEWER_STREAM_HOST, CAMERA_VIEWER_STREAM_PORT),
+            StreamHandler,
+        )
+        server_thread = threading.Thread(
+            target=server.serve_forever,
+            daemon=True,
+        )
+        server_thread.start()
+        print(
+            "[WEB] Luồng camera nội bộ sẵn sàng tại "
+            f"http://{CAMERA_VIEWER_STREAM_HOST}:{CAMERA_VIEWER_STREAM_PORT}/stream"
+        )
+        return server, server_thread
+
     def run_gui(self):
         """Vòng lặp hiển thị giao diện OpenCV với thanh trượt và phím tắt"""
         if not self.connect():
@@ -327,6 +474,15 @@ class HikCameraViewer:
         window_name = f"Hikvision Camera - [{self.device_name}]"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, 1280, 966)
+        try:
+            web_stream, web_stream_thread = self._start_web_stream()
+        except OSError as error:
+            cv2.destroyAllWindows()
+            self.stop()
+            raise RuntimeError(
+                "Không thể mở luồng camera nội bộ cho giao diện web tại "
+                f"127.0.0.1:{CAMERA_VIEWER_STREAM_PORT}: {error}"
+            ) from error
 
         # Callback khi kéo trackbar (đơn vị: ms)
         def on_trackbar(val):
@@ -450,6 +606,10 @@ class HikCameraViewer:
                     break
 
         finally:
+            self.exit_event.set()
+            web_stream.shutdown()
+            web_stream.server_close()
+            web_stream_thread.join(timeout=1.0)
             cv2.destroyAllWindows()
             self.stop()
 

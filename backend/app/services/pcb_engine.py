@@ -43,11 +43,6 @@ STATUS_OK = "OK"
 STATUS_FAULTY = "FAULTY"
 STATUS_UNALIGNED = "UNALIGNED"
 
-
-class BoardCropError(RuntimeError):
-    """Raised when the PCB cannot be isolated from the input image."""
-
-
 CLASS_ALIASES = {
     "potentiometer": "variable resistor",
     "variable_resistor": "variable resistor",
@@ -100,11 +95,7 @@ def find_board_corners(frame):
         perimeter = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
         if len(approx) != 4 or not cv2.isContourConvex(approx):
-            hull = cv2.convexHull(contour)
-            hull_perimeter = cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, 0.02 * hull_perimeter, True)
-            if len(approx) != 4 or not cv2.isContourConvex(approx):
-                continue
+            continue
 
         corners = order_points(approx.reshape(4, 2))
         edge_lengths = np.linalg.norm(np.roll(corners, -1, axis=0) - corners, axis=1)
@@ -496,10 +487,10 @@ class PCBPipeline:
             translation = np.array([[1, 0, -x1], [0, 1, -y1], [0, 0, 1]], dtype=np.float64)
             return frame[y1:y2, x1:x2], translation, "roi"
 
-        raise BoardCropError(
-            "Không tìm thấy vùng bo mạch PCB trong ảnh; chưa chạy nhận diện. "
-            "Hãy căn lại camera để thấy rõ toàn bộ PCB rồi thử lại."
-        )
+        # Fallback to entire image
+        h, w = frame.shape[:2]
+        identity = np.eye(3, dtype=np.float64)
+        return frame, identity, "full"
 
     def _map_detections(self, detections, H):
         if not detections:
@@ -526,9 +517,8 @@ class PCBPipeline:
 
     def run_detection_only(self, frame, conf=DEFAULT_CONF, imgsz=DEFAULT_IMGSZ):
         start_time = time.time()
-        board_crop, _, crop_method = self.crop_board(frame)
-        detections = self.detect_components(board_crop, conf=conf, imgsz=imgsz)
-        annotated = board_crop.copy()
+        detections = self.detect_components(frame, conf=conf, imgsz=imgsz)
+        annotated = frame.copy()
 
         # Class counts
         counter = Counter(d["class"] for d in detections)
@@ -545,8 +535,7 @@ class PCBPipeline:
             "total_count": len(detections),
             "class_counts": dict(counter),
             "annotated_image": annotated,
-            "image_size": {"width": board_crop.shape[1], "height": board_crop.shape[0]},
-            "crop_method": crop_method,
+            "image_size": {"width": frame.shape[1], "height": frame.shape[0]},
             "latency_ms": proc_time,
         }
 

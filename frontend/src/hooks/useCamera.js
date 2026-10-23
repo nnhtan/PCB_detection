@@ -21,7 +21,7 @@ export function useCamera() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const connect = async (source) => {
+  const connect = useCallback(async (source) => {
     setBusy(true);
     setError("");
     try {
@@ -36,9 +36,9 @@ export function useCamera() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refresh]);
 
-  const disconnect = async () => {
+  const disconnect = useCallback(async () => {
     setBusy(true);
     try {
       const payload = await api.postForm("/api/camera/disconnect", new FormData());
@@ -48,7 +48,7 @@ export function useCamera() {
     } finally {
       setBusy(false);
     }
-  };
+  }, []);
 
   return { status, error, busy, connect, disconnect, refresh };
 }

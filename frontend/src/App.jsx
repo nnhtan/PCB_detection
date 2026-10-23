@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AlertTriangle, Bell, ChevronRight, Cpu } from "lucide-react";
 import { Link, Route, Routes, useLocation } from "react-router-dom";
 import Sidebar from "./components/layout/Sidebar.jsx";
@@ -8,6 +8,7 @@ import CameraPage from "./pages/CameraPage.jsx";
 import ReferencePage from "./pages/ReferencePage.jsx";
 import DocsPage from "./pages/DocsPage.jsx";
 import { useAppStore } from "./store/appStore.js";
+import { useCamera } from "./hooks/useCamera.js";
 
 const titles = {
   "/": "Kiểm tra PCB",
@@ -19,10 +20,19 @@ const titles = {
 
 export default function App() {
   const location = useLocation();
+  const { status: cameraStatus, connect: connectCamera } = useCamera();
+  const cameraConnectAttempted = useRef(false);
   const loadSystem = useAppStore((state) => state.loadSystem);
   const error = useAppStore((state) => state.error);
   const info = useAppStore((state) => state.info);
   useEffect(() => { loadSystem(); }, [loadSystem]);
+  useEffect(() => {
+    if (!cameraStatus || cameraConnectAttempted.current) return;
+    cameraConnectAttempted.current = true;
+    if (!cameraStatus.connected || cameraStatus.source?.toLowerCase() !== "hikvision") {
+      connectCamera("hikvision");
+    }
+  }, [cameraStatus, connectCamera]);
 
   return (
     <div className="app-shell">

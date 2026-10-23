@@ -43,4 +43,4 @@ SAMPLE_IMAGE_PATH = Path(
     os.getenv("PCB_SAMPLE_IMAGE_PATH", str(DEFAULT_SAMPLE_IMAGE_PATH))
 ).expanduser()
 FRONTEND_DIST_DIR = PROJECT_DIR / "frontend" / "dist"
-CAMERA_SOURCE = os.getenv("PCB_CAMERA_SOURCE", "hikrobot")
+CAMERA_SOURCE = os.getenv("PCB_CAMERA_SOURCE", "0")

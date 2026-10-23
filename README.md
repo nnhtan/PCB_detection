@@ -20,7 +20,7 @@
 - **Danh mục mạch tham chiếu:** lưu nhiều ảnh PCB chuẩn với tên riêng, chọn lại mạch cần dùng bất cứ lúc nào; lựa chọn hiện tại được giữ sau khi backend khởi động lại.
 - **Kiểm tra PCB:** tải ảnh PCB cần kiểm tra riêng, căn chỉnh với mạch chuẩn, so sánh vị trí và phân loại linh kiện thiếu/thừa.
 - **Nhận diện YOLO:** phát hiện và thống kê linh kiện trong ảnh độc lập, không yêu cầu reference.
-- **Camera trực tiếp:** kết nối camera Hikrobot trực tiếp qua MVS SDK hoặc webcam/camera IP, xem MJPEG, quét từng frame hoặc đặt quét tự động mỗi 3, 5, hoặc 10 giây.
+- **Camera trực tiếp:** kết nối webcam hoặc camera IP, xem MJPEG, quét từng frame hoặc đặt quét tự động mỗi 3, 5, hoặc 10 giây.
 - **Kết quả trực quan:** ảnh đánh dấu detections, số lượng linh kiện, kết quả đối chiếu và thời gian xử lý.
 - **API docs:** FastAPI Swagger UI tại `/docs`.
 
@@ -123,6 +123,17 @@ npm.cmd run dev
 
 Mở URL Vite hiện trong terminal, mặc định là `http://localhost:5173`. Frontend chuyển tiếp các request `/api`, `/health` và `/docs` tới backend cổng 8000. Giữ cả hai terminal chạy khi sử dụng.
 
+Nếu backend chạy ở cổng khác (ví dụ `8001`), đặt cùng địa chỉ trước khi chạy frontend:
+
+```powershell
+$env:PCB_API_URL = "http://127.0.0.1:8001"
+npm.cmd run dev
+```
+
+### Kết nối camera Hikvision trên giao diện web
+
+Backend phải chạy trên chính máy tính đã kết nối camera Hikvision. Cài Hikvision MVS để có SDK `MvCameraControl.dll`. Khi mở ứng dụng web, giao diện tự kết nối nguồn `hikvision`; không cần nhập nguồn hay nhấn nút kết nối. Backend dùng cùng SDK Hikvision và cách lấy ảnh như `camera_viewer.py`; không cần chạy đồng thời chương trình xem camera desktop. Webcam máy tính vẫn dùng chỉ số như `0`, còn camera IP có thể dùng URL luồng như trước.
+
 ### Chạy giao diện đã build qua FastAPI
 
 Nếu muốn mở giao diện tại cổng 8000 thay vì 5173, build frontend:
@@ -165,11 +176,10 @@ Trong **Nhận diện YOLO**, tải một ảnh rồi chọn **Nhận diện lin
 
 ### Camera trực tiếp
 
-1. Đảm bảo MVS SDK, thư mục `Python\MvImport` và camera Hikrobot được cài/kết nối trên máy chạy backend. Không cần chạy `camera_viewer.py`.
-2. Trên trang **Camera trực tiếp**, chọn **Kết nối Hikrobot**. Backend mở camera trực tiếp bằng MVS SDK, sau đó stream và quét frame trên web.
-3. Hoặc nhập `0` để dùng webcam mặc định trên máy chạy backend, hay nhập URL stream camera IP; sau đó chọn **Kết nối nguồn khác**.
-4. Chọn **Quét khung hình** để quét thủ công. Kết quả xuất hiện bên cạnh stream.
-5. Chọn chu kỳ **3 giây**, **5 giây** hoặc **10 giây**, sau đó chọn **Tự động quét**. Chọn **Dừng tự động** để dừng; ngắt camera cũng sẽ dừng chế độ này.
+1. Nhập `0` để dùng webcam mặc định trên máy chạy backend, hoặc nhập URL stream camera IP.
+2. Chọn **Kết nối camera**.
+3. Chọn **Quét khung hình** để quét thủ công. Kết quả xuất hiện bên cạnh stream.
+4. Chọn chu kỳ **3 giây**, **5 giây** hoặc **10 giây**, sau đó chọn **Tự động quét**. Chọn **Dừng tự động** để dừng; ngắt camera cũng sẽ dừng chế độ này.
 
 Camera index như `0` trỏ tới máy đang chạy backend, không phải máy đang mở trình duyệt. Để dùng camera IP, cả backend và thiết bị camera phải truy cập được URL stream.
 
@@ -192,7 +202,7 @@ Các endpoint có tại `/api/...`. Alias tương thích cũng được cung c�
 | `POST` | `/api/camera/disconnect` | Ngắt camera |
 | `GET` | `/api/camera/stream` | Luồng MJPEG |
 | `POST` | `/api/camera/scan` | Quét frame mới nhất |
-| `POST` | `/api/camera/snapshot` | Chụp frame từ camera Hikrobot đã kết nối hoặc mở nguồn khác để kiểm tra |
+| `POST` | `/api/camera/snapshot` | Mở nguồn camera, chụp một frame và kiểm tra |
 
 Swagger UI: `http://127.0.0.1:8000/docs`. ReDoc: `http://127.0.0.1:8000/redoc`.
 
@@ -266,22 +276,15 @@ Inference sẽ dùng model thật và có thể mất thời gian tùy phần c�
 
 ## Chạy chương trình camera desktop
 
-`test.py` chạy cửa sổ OpenCV độc lập, không phải frontend web. Mặc định chương trình kết nối camera Hikvision qua SDK trong `camera_viewer.py`; cần cài MVS và đặt SDK trong `Python\MvImport`. Chương trình dùng model trong `backend\models\best.pt` nếu có, nếu không sẽ fallback về model ở thư mục gốc. Reference JSON được đọc từ `backend\storage\reference_components.json`.
+`test.py` chạy cửa sổ OpenCV độc lập, không phải frontend web. Chương trình dùng model trong `backend\models\best.pt` nếu có, nếu không sẽ fallback về model ở thư mục gốc. Reference JSON được đọc từ `backend\storage\reference_components.json`.
 
 ```powershell
 cd D:\PCB_detection
+$env:PCB_CAMERA_SOURCE = "0"
 python test.py
 ```
 
-Để thay bằng webcam hoặc stream IP dùng OpenCV, đặt backend và nguồn trước khi chạy:
-
-```powershell
-$env:PCB_CAMERA_BACKEND = "opencv"
-$env:PCB_CAMERA_SOURCE = "0" # hoặc URL stream camera IP
-python test.py
-```
-
-Nhấn `s` để quét frame và `q` để thoát.
+Phím điều khiển phụ thuộc vào chương trình desktop; nhấn `s` để quét frame và `q` để thoát.
 
 `machpcbgoc.py` tạo reference map bằng YOLO từ ảnh `2.jpg` và lưu dữ liệu/ảnh đã đánh dấu trong `backend\storage`:
 

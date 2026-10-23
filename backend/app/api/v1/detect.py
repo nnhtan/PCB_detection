@@ -7,7 +7,7 @@ from backend.app.api.v1.common import (
     read_upload,
     run_pipeline_operation,
 )
-from backend.app.services.pcb_engine import BoardCropError, DEFAULT_CONF, DEFAULT_IMGSZ
+from backend.app.services.pcb_engine import DEFAULT_CONF, DEFAULT_IMGSZ
 
 router = APIRouter()
 
@@ -29,8 +29,6 @@ async def detect_components(
             conf,
             imgsz,
         )
-    except BoardCropError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {
@@ -40,7 +38,6 @@ async def detect_components(
         "total_count": result["total_count"],
         "class_counts": result["class_counts"],
         "image_size": result["image_size"],
-        "crop_method": result["crop_method"],
         "latency_ms": result["latency_ms"],
         "annotated_image": image_to_data_uri(result["annotated_image"]),
     }

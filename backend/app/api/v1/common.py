@@ -70,7 +70,6 @@ def inspection_payload(result: dict[str, Any], filename: str | None = None) -> d
 
 def run_inspection(pipeline: Any, frame: np.ndarray, values: Any) -> dict[str, Any]:
     from backend.app.services.pcb_engine import (
-        BoardCropError,
         DEFAULT_CONF,
         DEFAULT_EXTRA_ALLOWED,
         DEFAULT_IMGSZ,
@@ -96,8 +95,6 @@ def run_inspection(pipeline: Any, frame: np.ndarray, values: Any) -> dict[str, A
                 missing_allowed=int(values.get("missing_allowed", DEFAULT_MISSING_ALLOWED)),
                 auto_crop=parse_bool(values.get("auto_crop", True)),
             )
-    except BoardCropError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

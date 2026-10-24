@@ -17,6 +17,7 @@ class CameraManager:
         self.thread: threading.Thread | None = None
         self.is_connected = False
         self.last_error = ""
+        self.hik_camera = None
 
     @staticmethod
     def _parse_source(source: str | int) -> str | int:
@@ -171,6 +172,7 @@ class CameraManager:
                 return
 
             with self.lock:
+                self.hik_camera = viewer
                 self.is_connected = True
                 self.last_error = ""
 
@@ -206,12 +208,29 @@ class CameraManager:
                 self.last_error = f"Lỗi camera Hikvision: {exc}"
                 self.running = False
         finally:
-            try:
-                if viewer is not None:
+            if viewer is not None:
+                try:
                     viewer.stop()
-            finally:
-                with self.lock:
-                    self.is_connected = False
+                except Exception as exc:
+                    with self.lock:
+                        self.last_error = f"Lỗi ngắt kết nối camera Hikvision: {exc}"
+            with self.lock:
+                if self.hik_camera is viewer:
+                    self.hik_camera = None
+                self.is_connected = False
+
+    def set_exposure(self, exposure_us: float) -> dict[str, float]:
+        with self.lock:
+            camera = self.hik_camera
+            if not self.is_connected or camera is None:
+                raise RuntimeError("Camera Hikrobot chưa kết nối.")
+            if not camera.set_exposure(exposure_us):
+                raise RuntimeError("Camera Hikrobot không thể cập nhật thời gian phơi sáng.")
+            return {
+                "exposure_us": camera.current_exposure_us,
+                "exposure_min_us": camera.exp_min,
+                "exposure_max_us": camera.exp_max,
+            }
 
     def get_frame(self) -> tuple[np.ndarray | None, int, float]:
         with self.lock:
@@ -221,7 +240,7 @@ class CameraManager:
 
     def get_status(self) -> dict[str, object]:
         with self.lock:
-            return {
+            status = {
                 "running": self.running,
                 "connected": self.is_connected,
                 "source": str(self.source),
@@ -229,6 +248,13 @@ class CameraManager:
                 "fps": self.fps,
                 "last_error": self.last_error,
             }
+            if self.source == "hikrobot" and self.hik_camera is not None:
+                status.update({
+                    "exposure_us": self.hik_camera.current_exposure_us,
+                    "exposure_min_us": self.hik_camera.exp_min,
+                    "exposure_max_us": self.hik_camera.exp_max,
+                })
+            return status
 
     def mjpeg_frames(self):
         while True:

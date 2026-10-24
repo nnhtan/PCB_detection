@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, CheckCircle2, CircleStop, LoaderCircle, Pause, Play, RotateCcw, ScanLine, Video, Workflow, XCircle } from "lucide-react";
+import { Camera, CheckCircle2, CircleStop, Crop, LoaderCircle, Pause, Play, RotateCcw, ScanLine, Video, Workflow, XCircle } from "lucide-react";
 import PageHeader from "../common/PageHeader.jsx";
 import InspectionResults from "../inspector/InspectionResults.jsx";
 import { useCamera } from "../../hooks/useCamera.js";
@@ -10,13 +10,23 @@ export default function CameraPanel() {
   const [source, setSource] = useState("hikvision");
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
+  const [exposureUs, setExposureUs] = useState(300000);
+  const [exposureBusy, setExposureBusy] = useState(false);
+  const [exposureError, setExposureError] = useState("");
   const [result, setResult] = useState(null);
+  const [autoCrop, setAutoCrop] = useState(true);
   const [autoScan, setAutoScan] = useState(false);
   const [autoScanPaused, setAutoScanPaused] = useState(false);
   const [scanInterval, setScanInterval] = useState(3);
   const [autoScanCounts, setAutoScanCounts] = useState({ ok: 0, faulty: 0 });
   const scanInProgress = useRef(false);
   const countSession = useRef(0);
+
+  useEffect(() => {
+    if (status?.source === "hikrobot" && status.exposure_us != null) {
+      setExposureUs(status.exposure_us);
+    }
+  }, [status?.source, status?.connected]);
 
   const scan = useCallback(async (countAutomaticResult = false) => {
     if (scanInProgress.current) return;
@@ -25,7 +35,9 @@ export default function CameraPanel() {
     setScanBusy(true);
     setScanError("");
     try {
-      const response = await api.postForm("/api/camera/scan", new FormData());
+      const form = new FormData();
+      form.append("auto_crop", String(autoCrop));
+      const response = await api.postForm("/api/camera/scan", form);
       setResult(response);
       if (countAutomaticResult && scanCountSession === countSession.current) {
         const verdict = response.verdict || response.status;
@@ -44,7 +56,7 @@ export default function CameraPanel() {
       scanInProgress.current = false;
       setScanBusy(false);
     }
-  }, []);
+  }, [autoCrop]);
 
   useEffect(() => {
     if (!autoScan || autoScanPaused || !status?.connected) return undefined;
@@ -72,6 +84,21 @@ export default function CameraPanel() {
     await disconnect();
   };
 
+  const applyExposure = async () => {
+    setExposureBusy(true);
+    setExposureError("");
+    try {
+      const form = new FormData();
+      form.append("exposure_us", String(exposureUs));
+      const response = await api.postForm("/api/camera/exposure", form);
+      setExposureUs(response.exposure_us);
+    } catch (requestError) {
+      setExposureError(requestError.message);
+    } finally {
+      setExposureBusy(false);
+    }
+  };
+
   return (
     <>
       <PageHeader eyebrow="LIVE INSPECTION" title="Camera trực tiếp" description="Kết nối camera Hikvision, webcam hoặc camera IP để xem stream và quét PCB ngay tại chỗ." />
@@ -81,6 +108,17 @@ export default function CameraPanel() {
           <div className="camera-actions">
             {status?.connected ? <button className="button button-danger" disabled={cameraBusy} onClick={stopCamera}><CircleStop size={16} /> Ngắt kết nối</button> : <button className="button button-primary" disabled={cameraBusy || !source.trim()} onClick={() => connect(source)}>{cameraBusy ? <LoaderCircle className="spin" size={16} /> : <Video size={16} />} Kết nối camera</button>}
             <button className="button button-light" disabled={!status?.connected || scanBusy} onClick={scan}>{scanBusy ? <LoaderCircle className="spin" size={16} /> : <ScanLine size={16} />} Quét khung hình</button>
+            <button
+              type="button"
+              className={`toggle-crop-button ${autoCrop ? "active" : ""}`}
+              onClick={() => setAutoCrop((prev) => !prev)}
+              title={autoCrop ? "Tự động nhận diện & cắt nắn bo mạch: ĐANG BẬT" : "Tự động cắt bo mạch: ĐANG TẮT (quét toàn khung hình)"}
+            >
+              <Crop size={15} />
+              <span>Auto-Crop</span>
+              <span className="crop-indicator" />
+              <strong>{autoCrop ? "BẬT" : "TẮT"}</strong>
+            </button>
             <div className="auto-scan-controls">
               <label className="auto-scan-interval" htmlFor="camera-scan-interval">Mỗi</label>
               <select id="camera-scan-interval" value={scanInterval} onChange={(event) => setScanInterval(Number(event.target.value))} aria-label="Chu kỳ quét tự động">
@@ -94,7 +132,31 @@ export default function CameraPanel() {
             </div>
           </div>
         </div>
+        {(status?.source === "hikrobot" || status?.source === "hikvision") && status.connected && status.exposure_min_us != null && (
+          <div className="camera-exposure">
+            <label className="camera-exposure-label" htmlFor="camera-exposure">
+              <span>Thời gian lấy sáng</span>
+              <strong>{(exposureUs / 1000).toFixed(1)} ms</strong>
+            </label>
+            <input
+              id="camera-exposure"
+              type="range"
+              min={status.exposure_min_us}
+              max={status.exposure_max_us}
+              step={Math.max(1, Math.round((status.exposure_max_us - status.exposure_min_us) / 1000))}
+              value={exposureUs}
+              onChange={(event) => setExposureUs(Number(event.target.value))}
+              disabled={exposureBusy}
+              aria-label="Thời gian lấy sáng camera"
+            />
+            <button className="button button-light button-small" onClick={applyExposure} disabled={exposureBusy || exposureUs === status.exposure_us}>
+              {exposureBusy ? <LoaderCircle className="spin" size={14} /> : null} Áp dụng
+            </button>
+            <span className="camera-exposure-hint">Khoảng hỗ trợ: {(status.exposure_min_us / 1000).toFixed(1)}–{(status.exposure_max_us / 1000).toFixed(1)} ms</span>
+          </div>
+        )}
         {(cameraError || status?.last_error || scanError) && <div className="alert alert-error">{cameraError || status?.last_error || scanError}</div>}
+        {exposureError && <div className="alert alert-error">{exposureError}</div>}
         <div className="camera-workspace">
           <section className="camera-view">
             <img src={api.cameraStream} alt="Luồng camera trực tiếp" />

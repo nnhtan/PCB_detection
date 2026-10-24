@@ -74,6 +74,8 @@ _ROI_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
 _ROI_OPEN_KERNEL = np.ones((5, 5), dtype=np.uint8)
 _BLUE_LOW = np.array([85, 35, 20], dtype=np.uint8)
 _BLUE_HIGH = np.array([145, 255, 255], dtype=np.uint8)
+_GREEN_LOW = np.array([35, 35, 20], dtype=np.uint8)
+_GREEN_HIGH = np.array([85, 255, 255], dtype=np.uint8)
 
 
 def find_board_corners(frame):
@@ -139,9 +141,11 @@ def rectify_board(frame, corners):
 def find_board_roi(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     blue_mask = cv2.inRange(hsv, _BLUE_LOW, _BLUE_HIGH)
-    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, _ROI_CLOSE_KERNEL, iterations=2)
-    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, _ROI_OPEN_KERNEL, iterations=1)
-    contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    green_mask = cv2.inRange(hsv, _GREEN_LOW, _GREEN_HIGH)
+    mask = cv2.bitwise_or(blue_mask, green_mask)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _ROI_CLOSE_KERNEL, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _ROI_OPEN_KERNEL, iterations=1)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
 
@@ -474,7 +478,7 @@ class PCBPipeline:
             })
         return detections
 
-    def crop_board(self, frame):
+    def crop_board(self, frame, fallback_full=True):
         corners = find_board_corners(frame)
         if corners is not None:
             rectified, transform = rectify_board(frame, corners)
@@ -487,10 +491,14 @@ class PCBPipeline:
             translation = np.array([[1, 0, -x1], [0, 1, -y1], [0, 0, 1]], dtype=np.float64)
             return frame[y1:y2, x1:x2], translation, "roi"
 
-        # Fallback to entire image
-        h, w = frame.shape[:2]
-        identity = np.eye(3, dtype=np.float64)
-        return frame, identity, "full"
+        if fallback_full:
+            identity = np.eye(3, dtype=np.float64)
+            return frame, identity, "full"
+
+        raise BoardCropError(
+            "Không tìm thấy vùng bo mạch PCB trong ảnh; chưa chạy nhận diện. "
+            "Hãy căn lại camera để thấy rõ toàn bộ PCB rồi thử lại."
+        )
 
     def _map_detections(self, detections, H):
         if not detections:
@@ -515,10 +523,15 @@ class PCBPipeline:
             transformed.append(d)
         return transformed
 
-    def run_detection_only(self, frame, conf=DEFAULT_CONF, imgsz=DEFAULT_IMGSZ):
+    def run_detection_only(self, frame, conf=DEFAULT_CONF, imgsz=DEFAULT_IMGSZ, auto_crop=True):
         start_time = time.time()
-        detections = self.detect_components(frame, conf=conf, imgsz=imgsz)
-        annotated = frame.copy()
+        crop_method = "full"
+        if auto_crop:
+            board_crop, _, crop_method = self.crop_board(frame, fallback_full=True)
+        else:
+            board_crop = frame
+        detections = self.detect_components(board_crop, conf=conf, imgsz=imgsz)
+        annotated = board_crop.copy()
 
         # Class counts
         counter = Counter(d["class"] for d in detections)
@@ -552,7 +565,7 @@ class PCBPipeline:
 
         crop_method = "full"
         if auto_crop:
-            board_crop, board_transform, crop_method = self.crop_board(frame)
+            board_crop, board_transform, crop_method = self.crop_board(frame, fallback_full=True)
         else:
             board_crop = frame
             board_transform = np.eye(3, dtype=np.float64)

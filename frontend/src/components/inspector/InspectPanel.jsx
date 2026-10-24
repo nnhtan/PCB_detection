@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRight, ImagePlus, LoaderCircle, ScanLine, Sparkles } from "lucide-react";
+import { ArrowRight, Crop, ImagePlus, LoaderCircle, ScanLine, Sparkles } from "lucide-react";
 import PageHeader from "../common/PageHeader.jsx";
 import UploadCard from "../common/UploadCard.jsx";
 import InspectionResults from "./InspectionResults.jsx";
@@ -50,7 +50,19 @@ export default function InspectPanel() {
             <input type="range" min="0.1" max="0.9" step="0.05" value={conf} onChange={(event) => setConf(Number(event.target.value))} />
             <label className="field-label">Dung sai vị trí <strong>{(tolerance * 100).toFixed(1)}%</strong></label>
             <input type="range" min="0.01" max="0.12" step="0.005" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
-            <label className="check-option"><input type="checkbox" checked={autoCrop} onChange={(event) => setAutoCrop(event.target.checked)} /><span>Tự động tìm và căn chỉnh vùng PCB</span></label>
+            <div
+              className={`toggle-crop-card ${autoCrop ? "active" : ""}`}
+              onClick={() => setAutoCrop((prev) => !prev)}
+              role="button"
+              tabIndex={0}
+              title="Bật/Tắt tự động tìm và cắt bo mạch trước khi kiểm tra"
+            >
+              <div className="toggle-crop-card-info">
+                <Crop size={16} color={autoCrop ? "var(--purple)" : "#7b7c8f"} />
+                <span>Tự động cắt bo mạch (Auto-crop)</span>
+              </div>
+              <span className="toggle-crop-card-badge">{autoCrop ? "BẬT" : "TẮT"}</span>
+            </div>
             <div className="reference-note"><span className={reference?.components_count ? "text-success" : "text-warning"}>{reference?.components_count ? "●" : "●"}</span> Mạch chuẩn đang có <strong>{reference?.components_count || 0}</strong> linh kiện tham chiếu</div>
             <button className="button button-primary button-wide" disabled={!file || busy || !reference?.components_count} onClick={() => inspect(file, { conf, tolerance_ratio: tolerance, auto_crop: autoCrop })}>
               {busy ? <><LoaderCircle className="spin" size={17} /> Đang phân tích ảnh...</> : <><ScanLine size={17} /> Bắt đầu kiểm tra PCB</>}

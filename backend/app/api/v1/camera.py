@@ -1,3 +1,5 @@
+import math
+
 import cv2
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -47,6 +49,17 @@ def camera_disconnect(request: Request):
     }
 
 
+@router.post("/camera/exposure")
+def camera_set_exposure(request: Request, exposure_us: float = Form(...)):
+    if not math.isfinite(exposure_us):
+        raise HTTPException(status_code=422, detail="Thời gian phơi sáng không hợp lệ.")
+    try:
+        exposure = get_camera(request).set_exposure(exposure_us)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "success", "camera": get_camera(request).get_status(), **exposure}
+
+
 @router.get("/camera/stream")
 def camera_stream(request: Request):
     return StreamingResponse(
@@ -61,6 +74,7 @@ async def camera_scan(
     conf: float = Form(DEFAULT_CONF),
     imgsz: int = Form(DEFAULT_IMGSZ),
     tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
+    auto_crop: str | None = Form(None),
 ):
     camera = get_camera(request)
     frame, frame_id, fps = camera.get_frame()
@@ -77,6 +91,7 @@ async def camera_scan(
             "conf": conf,
             "imgsz": imgsz,
             "tolerance_ratio": tolerance_ratio,
+            "auto_crop": auto_crop if auto_crop is not None else True,
         },
     )
     payload = inspection_payload(result)
@@ -91,6 +106,7 @@ async def camera_snapshot(
     conf: float = Form(DEFAULT_CONF),
     imgsz: int = Form(DEFAULT_IMGSZ),
     tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
+    auto_crop: str | None = Form(None),
 ):
     camera_source: str | int
     try:
@@ -117,6 +133,7 @@ async def camera_snapshot(
             "conf": conf,
             "imgsz": imgsz,
             "tolerance_ratio": tolerance_ratio,
+            "auto_crop": auto_crop if auto_crop is not None else True,
         },
     )
     payload = inspection_payload(result)

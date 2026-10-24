@@ -4,6 +4,7 @@ from starlette.concurrency import run_in_threadpool
 from backend.app.api.v1.common import (
     get_pipeline,
     image_to_data_uri,
+    parse_bool,
     read_upload,
     run_pipeline_operation,
 )
@@ -18,6 +19,7 @@ async def detect_components(
     image: UploadFile = File(...),
     conf: float = Form(DEFAULT_CONF),
     imgsz: int = Form(DEFAULT_IMGSZ),
+    auto_crop: str | None = Form(None),
 ):
     frame, filename = await read_upload(image)
     try:
@@ -28,6 +30,7 @@ async def detect_components(
             frame,
             conf,
             imgsz,
+            parse_bool(auto_crop) if auto_crop is not None else True,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

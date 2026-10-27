@@ -210,13 +210,15 @@ Swagger UI: `http://127.0.0.1:8000/docs`. ReDoc: `http://127.0.0.1:8000/redoc`.
 
 Các endpoint upload ảnh nhận `multipart/form-data`, trường file bắt buộc tên là `image`. Giới hạn upload là 32 MB.
 
-- `/api/detect`: `image`, `conf`, `imgsz`.
+- `/api/detect`: `image`, `conf`, `imgsz`, `auto_crop`.
 - `/api/reference/update`: `image`, `name` (tùy chọn), `conf`, `imgsz`. Nếu bỏ `name`, tên file upload được dùng.
 - `/api/reference/select`: `reference_id` (ID lấy từ danh sách `catalog` của `/api/reference`).
 - `/api/inspect`: `image`, `conf`, `imgsz`, `tolerance_ratio`, `extra_allowed`, `missing_allowed`, `auto_crop`.
 - `/api/camera/connect`: `source`.
 - `/api/camera/scan`: `conf`, `imgsz`, `tolerance_ratio`.
 - `/api/camera/snapshot`: `source`, `conf`, `imgsz`, `tolerance_ratio`.
+
+Khi `auto_crop` được bật (mặc định), backend ưu tiên căn khung PCB theo ảnh mạch tham chiếu bằng ORB, sau đó mới thử tìm contour/màu. Nếu không tìm được bo mạch đầy đủ, yêu cầu bị từ chối thay vì chạy YOLO trên toàn ảnh; kết quả `/api/detect` trả thêm `crop_method` để xác nhận cách cắt đã dùng.
 
 Thông số kiểm tra mặc định trong pipeline: confidence `0.25`, ảnh YOLO `1536`, dung sai vị trí `0.045`, số linh kiện thiếu cho phép `0`, số linh kiện thừa cho phép `2`. Có thể xem thông số hiện hành tại `/api/info`.
 
@@ -278,7 +280,7 @@ Inference sẽ dùng model thật và có thể mất thời gian tùy phần c�
 
 `test.py` chạy cửa sổ OpenCV độc lập, không phải frontend web. Chương trình dùng model trong `backend\models\best.pt` nếu có, nếu không sẽ fallback về model ở thư mục gốc. Reference JSON được đọc từ `backend\storage\reference_components.json`. `test1.py` là lối chạy tương thích, dùng chung mã nguồn và cách cắt với `test.py`.
 
-Trước khi nhận diện, chương trình kết hợp nhiều ngưỡng Canny thích nghi với phân đoạn nền; nền được ước lượng từ các điểm mẫu ở viền ảnh để giảm tải xử lý. Với contour gần chữ nhật, bộ cắt ưu tiên `minAreaRect` để tránh các chi tiết linh kiện làm lệch góc. Góc PCB được làm mượt và xác nhận qua 5 frame; kích thước crop được kiểm tra ở độ phân giải gốc. Khi camera Hikvision xử lý ảnh, YOLO chạy ở luồng nền để cửa sổ live vẫn cập nhật và báo trạng thái đang quét/lỗi. Chỉ crop hợp lệ mới được chuyển sang nhận diện.
+Trước khi nhận diện, chương trình kết hợp nhiều ngưỡng Canny thích nghi với phân đoạn nền; nền được ước lượng từ các điểm mẫu ở viền ảnh để giảm tải xử lý. Với contour gần chữ nhật, bộ cắt ưu tiên `minAreaRect` để tránh các chi tiết linh kiện làm lệch góc. Nếu phát hiện contour lớn chạm mép ảnh cùng một contour nhỏ bên trong, chương trình từ chối crop để tránh nhận nhầm một phần linh kiện thành toàn bộ PCB; cần đặt trọn bo mạch trong khung camera. Góc PCB được làm mượt và xác nhận qua 5 frame; kích thước crop được kiểm tra ở độ phân giải gốc. Khi camera Hikvision xử lý ảnh, YOLO chạy ở luồng nền để cửa sổ live vẫn cập nhật và báo trạng thái đang quét/lỗi. Chỉ crop hợp lệ mới được chuyển sang nhận diện.
 
 ```powershell
 cd D:\PCB_detection

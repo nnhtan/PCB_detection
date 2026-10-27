@@ -742,6 +742,7 @@ def _evaluate_contour(c, shape):
 
 def _best_candidate(masks, shape):
     best, rejects = None, Counter()
+    largest_border_area = 0.0
     for source, binary in masks:
         contours, _ = cv2.findContours(
             binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -751,10 +752,14 @@ def _best_candidate(masks, shape):
             result = _evaluate_contour(contour, shape)
             if isinstance(result, str):
                 rejects[result] += 1
+                if result == "border":
+                    largest_border_area = max(
+                        largest_border_area, cv2.contourArea(contour)
+                    )
                 continue
             if best is None or result[0] > best[0]:
                 best = (result[0], contour, result[1], source)
-    return best, rejects
+    return best, rejects, largest_border_area
 
 
 def _basis(shape):
@@ -966,7 +971,10 @@ class BoardDetector:
         gray = small if small.ndim == 2 else cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         shape = gray.shape
         masks, edges, solid, info = self._candidates(gray)
-        candidate, rejects = _best_candidate(masks, shape)
+        candidate, rejects, largest_border_area = _best_candidate(masks, shape)
+        if (candidate is not None
+                and largest_border_area >= 2.0 * cv2.contourArea(candidate[1])):
+            candidate = None
 
         state = {"ready": False, "status": "", "raw_quad": None, "corners": None,
                  "frame_corners": None, "det_size": (det_w, det_h), "edges": edges,

@@ -78,44 +78,74 @@ _GREEN_LOW = np.array([35, 35, 20], dtype=np.uint8)
 _GREEN_HIGH = np.array([85, 255, 255], dtype=np.uint8)
 
 
-def find_board_corners(frame):
+def find_board_corners(frame, reference_aspect=None):
     frame_height, frame_width = frame.shape[:2]
-    detect_width, detect_height = BOARD_DETECTION_SIZE
-    resized = cv2.resize(frame, BOARD_DETECTION_SIZE)
+    detect_width = BOARD_DETECTION_SIZE[0]
+    scale = detect_width / frame_width
+    detect_height = max(1, round(frame_height * scale))
+    resized = cv2.resize(frame, (detect_width, detect_height))
     gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 150)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, _BOARD_KERNEL, iterations=2)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = max(
+        BOARD_CONTOUR_MIN_AREA,
+        0.015 * detect_width * detect_height,
+    )
+    best_candidate = None
+    for low, high in ((35, 100), (50, 150), (70, 180)):
+        edges = cv2.Canny(blur, low, high)
+        for kernel_size in (3, 5):
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT, (kernel_size, kernel_size)
+            )
+            closed = cv2.morphologyEx(
+                edges, cv2.MORPH_CLOSE, kernel, iterations=2
+            )
+            contours, _ = cv2.findContours(
+                closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for contour in sorted(
+                contours, key=cv2.contourArea, reverse=True
+            )[:12]:
+                area = cv2.contourArea(contour)
+                if area < min_area:
+                    continue
+                x, y, width, height = cv2.boundingRect(contour)
+                if (x <= 2 or y <= 2 or x + width >= detect_width - 2
+                        or y + height >= detect_height - 2):
+                    continue
 
-    best_area = BOARD_CONTOUR_MIN_AREA
-    best_corners = None
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area <= best_area:
-            continue
-        perimeter = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-        if len(approx) != 4 or not cv2.isContourConvex(approx):
-            continue
+                hull = cv2.convexHull(contour)
+                hull_area = cv2.contourArea(hull)
+                if hull_area <= 0 or area / hull_area < 0.25:
+                    continue
+                rect = cv2.minAreaRect(hull)
+                rect_width, rect_height = rect[1]
+                rect_area = rect_width * rect_height
+                if rect_area <= 0:
+                    continue
+                rectangularity = hull_area / rect_area
+                aspect = max(rect_width, rect_height) / min(rect_width, rect_height)
+                if rectangularity < 0.65:
+                    continue
+                if reference_aspect is not None:
+                    if not 0.6 * reference_aspect <= aspect <= 1.6 * reference_aspect:
+                        continue
+                elif not 1.1 <= aspect <= 4.0:
+                    continue
 
-        corners = order_points(approx.reshape(4, 2))
-        edge_lengths = np.linalg.norm(np.roll(corners, -1, axis=0) - corners, axis=1)
-        if edge_lengths.min() < 1:
-            continue
+                score = area * rectangularity * (area / hull_area)
+                if best_candidate is None or score > best_candidate[0]:
+                    best_candidate = (score, rect)
 
-        scale = 1 + 2 * BOARD_PADDING_RATIO
-        center = corners.mean(axis=0)
-        corners = center + (corners - center) * scale
-        corners[:, 0] = np.clip(corners[:, 0], 0, detect_width - 1)
-        corners[:, 1] = np.clip(corners[:, 1], 0, detect_height - 1)
-        corners[:, 0] *= frame_width / detect_width
-        corners[:, 1] *= frame_height / detect_height
+    if best_candidate is None:
+        return None
 
-        best_area = area
-        best_corners = corners
-
-    return best_corners
+    corners = order_points(cv2.boxPoints(best_candidate[1]))
+    center = corners.mean(axis=0)
+    corners = center + (corners - center) * (1 + 2 * BOARD_PADDING_RATIO)
+    corners[:, 0] *= frame_width / detect_width
+    corners[:, 1] *= frame_height / detect_height
+    return corners
 
 
 def rectify_board(frame, corners):
@@ -223,6 +253,51 @@ class OrbAligner:
         if not is_valid_homography(H, self.ref_shape, frame.shape):
             return None
         return H
+
+
+class BoardCropError(RuntimeError):
+    """Raised when automatic PCB cropping cannot find a complete board."""
+
+
+def find_reference_board_corners(frame, aligner):
+    if aligner is None or not aligner.valid:
+        return None
+
+    homography = aligner.compute_homography(frame)
+    if homography is None:
+        return None
+
+    frame_height, frame_width = frame.shape[:2]
+    reference_height, reference_width = aligner.ref_shape[:2]
+    reference_corners = np.float32([
+        [0, 0],
+        [reference_width - 1, 0],
+        [reference_width - 1, reference_height - 1],
+        [0, reference_height - 1],
+    ]).reshape(-1, 1, 2)
+
+    try:
+        corners = cv2.perspectiveTransform(
+            reference_corners, np.linalg.inv(homography)
+        ).reshape(-1, 2)
+    except np.linalg.LinAlgError:
+        return None
+
+    if (not np.all(np.isfinite(corners))
+            or not cv2.isContourConvex(corners.astype(np.float32))):
+        return None
+    if (np.any(corners[:, 0] < -2) or np.any(corners[:, 0] > frame_width + 1)
+            or np.any(corners[:, 1] < -2) or np.any(corners[:, 1] > frame_height + 1)):
+        return None
+    corners[:, 0] = np.clip(corners[:, 0], 0, frame_width - 1)
+    corners[:, 1] = np.clip(corners[:, 1], 0, frame_height - 1)
+
+    area_ratio = cv2.contourArea(corners.astype(np.float32)) / (
+        frame_width * frame_height
+    )
+    if not 0.03 <= area_ratio <= 1.0:
+        return None
+    return order_points(corners)
 
 
 def estimate_component_alignment(reference_components, detections, tolerance, conf_thresh):
@@ -478,8 +553,18 @@ class PCBPipeline:
             })
         return detections
 
-    def crop_board(self, frame, fallback_full=True):
-        corners = find_board_corners(frame)
+    def crop_board(self, frame, fallback_full=False):
+        reference_corners = find_reference_board_corners(frame, self.aligner)
+        if reference_corners is not None:
+            rectified, transform = rectify_board(frame, reference_corners)
+            if rectified is not None:
+                return rectified, transform, "reference"
+
+        reference_aspect = None
+        if self.reference_image is not None:
+            reference_height, reference_width = self.reference_image.shape[:2]
+            reference_aspect = reference_width / reference_height
+        corners = find_board_corners(frame, reference_aspect=reference_aspect)
         if corners is not None:
             rectified, transform = rectify_board(frame, corners)
             if rectified is not None:
@@ -527,7 +612,7 @@ class PCBPipeline:
         start_time = time.time()
         crop_method = "full"
         if auto_crop:
-            board_crop, _, crop_method = self.crop_board(frame, fallback_full=True)
+            board_crop, board_transform, crop_method = self.crop_board(frame)
         else:
             board_crop = frame
         detections = self.detect_components(board_crop, conf=conf, imgsz=imgsz)
@@ -548,7 +633,8 @@ class PCBPipeline:
             "total_count": len(detections),
             "class_counts": dict(counter),
             "annotated_image": annotated,
-            "image_size": {"width": frame.shape[1], "height": frame.shape[0]},
+            "image_size": {"width": board_crop.shape[1], "height": board_crop.shape[0]},
+            "crop_method": crop_method,
             "latency_ms": proc_time,
         }
 
@@ -565,7 +651,7 @@ class PCBPipeline:
 
         crop_method = "full"
         if auto_crop:
-            board_crop, board_transform, crop_method = self.crop_board(frame, fallback_full=True)
+            board_crop, board_transform, crop_method = self.crop_board(frame)
         else:
             board_crop = frame
             board_transform = np.eye(3, dtype=np.float64)

@@ -148,6 +148,200 @@ class ReferenceCatalog:
                     f"Không tìm thấy mạch tham chiếu có mã '{reference_id}'."
                 ) from exc
 
+    @staticmethod
+    def _remove_tree(path: Path) -> None:
+        def _on_error(func, p, exc_info):
+            import stat
+
+            try:
+                os.chmod(p, stat.S_IWRITE)
+                func(p)
+            except Exception:
+                pass
+
+        shutil.rmtree(path, onerror=_on_error)
+
+    def delete(self, reference_id: str) -> dict[str, Any]:
+        with self.operation_lock:
+            reference = next(
+                (item for item in self.references if item["id"] == reference_id),
+                None,
+            )
+            if reference is None:
+                raise LookupError(
+                    f"Không tìm thấy mạch tham chiếu có mã '{reference_id}'."
+                )
+
+            paths = self._reference_paths(reference_id)
+            references_dir = self.references_dir.resolve()
+            folder = paths["folder"]
+            if folder.is_symlink() or (
+                folder.exists() and folder.resolve().parent != references_dir
+            ):
+                raise RuntimeError("Đường dẫn dữ liệu mạch tham chiếu không hợp lệ.")
+
+            remaining = [
+                item for item in self.references if item["id"] != reference_id
+            ]
+            next_reference = remaining[0] if remaining else None
+            was_active = self.active_reference_id == reference_id
+            previous_state = {
+                "references": self.references,
+                "active_reference_id": self.active_reference_id,
+                "reference_data": self.pipeline.reference_data,
+                "reference_components": self.pipeline.reference_components,
+                "reference_image": self.pipeline.reference_image,
+                "aligner": self.pipeline.aligner,
+                "ref_json_path": self.pipeline.ref_json_path,
+                "ref_image_path": self.pipeline.ref_image_path,
+            }
+            staged_folder = folder.with_name(
+                f".{folder.name}.deleting-{uuid.uuid4().hex}"
+            )
+
+            try:
+                if folder.exists():
+                    os.replace(folder, staged_folder)
+                if was_active:
+                    if next_reference is not None:
+                        self._activate(next_reference["id"], persist=False)
+                    else:
+                        self.pipeline.reference_data = None
+                        self.pipeline.reference_components = []
+                        self.pipeline.reference_image = None
+                        self.pipeline.aligner = None
+                        self.active_reference_id = None
+                self.references = remaining
+                if was_active:
+                    self.active_reference_id = (
+                        next_reference["id"] if next_reference is not None else None
+                    )
+                else:
+                    self.active_reference_id = previous_state["active_reference_id"]
+                self._persist()
+            except Exception:
+                self.references = previous_state["references"]
+                self.active_reference_id = previous_state["active_reference_id"]
+                self.pipeline.reference_data = previous_state["reference_data"]
+                self.pipeline.reference_components = previous_state[
+                    "reference_components"
+                ]
+                self.pipeline.reference_image = previous_state["reference_image"]
+                self.pipeline.aligner = previous_state["aligner"]
+                self.pipeline.ref_json_path = previous_state["ref_json_path"]
+                self.pipeline.ref_image_path = previous_state["ref_image_path"]
+                if staged_folder.exists() and not folder.exists():
+                    os.replace(staged_folder, folder)
+                raise
+
+            cleanup_warning = None
+            if staged_folder.exists():
+                try:
+                    self._remove_tree(staged_folder)
+                except OSError as exc:
+                    cleanup_warning = (
+                        "Mạch đã được xóa khỏi danh mục nhưng chưa dọn được "
+                        f"thư mục dữ liệu: {exc}"
+                    )
+
+            return {
+                "reference": dict(reference),
+                "was_active": was_active,
+                "active_reference_id": self.active_reference_id,
+                "active_reference": (
+                    dict(next_reference)
+                    if was_active and next_reference is not None
+                    else None
+                    if was_active
+                    else next(
+                        (
+                            dict(item)
+                            for item in remaining
+                            if item["id"] == self.active_reference_id
+                        ),
+                        None,
+                    )
+                ),
+                "cleanup_warning": cleanup_warning,
+            }
+
+    def delete_unused(self) -> dict[str, Any]:
+        with self.operation_lock:
+            unused = [
+                item
+                for item in self.references
+                if item["id"] != self.active_reference_id
+            ]
+            if not unused:
+                return {
+                    "deleted_count": 0,
+                    "deleted_references": [],
+                    "warnings": [],
+                }
+
+            deleted = []
+            warnings = []
+            references_dir = self.references_dir.resolve()
+            staged_folders: list[Path] = []
+
+            for item in unused:
+                ref_id = item["id"]
+                paths = self._reference_paths(ref_id)
+                folder = paths["folder"]
+                if folder.is_symlink() or (
+                    folder.exists() and folder.resolve().parent != references_dir
+                ):
+                    warnings.append(
+                        f"Bỏ qua mạch '{item['name']}': đường dẫn không hợp lệ."
+                    )
+                    continue
+
+                staged_folder = folder.with_name(
+                    f".{folder.name}.deleting-{uuid.uuid4().hex}"
+                )
+                try:
+                    if folder.exists():
+                        os.replace(folder, staged_folder)
+                        staged_folders.append(staged_folder)
+                    deleted.append(item)
+                except Exception as exc:
+                    warnings.append(
+                        f"Không thể di dời thư mục của mạch '{item['name']}': {exc}"
+                    )
+                    if staged_folder.exists() and not folder.exists():
+                        os.replace(staged_folder, folder)
+
+            deleted_ids = {item["id"] for item in deleted}
+            previous_references = list(self.references)
+            self.references = [
+                item for item in self.references if item["id"] not in deleted_ids
+            ]
+            try:
+                self._persist()
+            except Exception:
+                self.references = previous_references
+                for staged_folder in staged_folders:
+                    original_name = staged_folder.name.split(".deleting-")[0].lstrip(".")
+                    orig = staged_folder.with_name(original_name)
+                    if staged_folder.exists() and not orig.exists():
+                        os.replace(staged_folder, orig)
+                raise
+
+            for staged_folder in staged_folders:
+                if staged_folder.exists():
+                    try:
+                        self._remove_tree(staged_folder)
+                    except OSError as exc:
+                        warnings.append(
+                            f"Chưa dọn được thư mục tạm {staged_folder.name}: {exc}"
+                        )
+
+            return {
+                "deleted_count": len(deleted),
+                "deleted_references": [dict(item) for item in deleted],
+                "warnings": warnings,
+            }
+
     def create(
         self,
         image: np.ndarray,

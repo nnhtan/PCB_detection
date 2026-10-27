@@ -10,8 +10,8 @@ import { useAppStore } from "../../store/appStore.js";
 export default function InspectPanel() {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
-  const [conf, setConf] = useState(0.25);
-  const [tolerance, setTolerance] = useState(0.045);
+  const [conf, setConf] = useState(0.35);
+  const [tolerance, setTolerance] = useState(0.55);
   const [autoCrop, setAutoCrop] = useState(true);
   const reference = useAppStore((state) => state.reference);
   const { result, error, busy, inspect } = useInspect();
@@ -38,7 +38,7 @@ export default function InspectPanel() {
         <ArrowRight size={17} className="workflow-arrow" />
         <div className="workflow-step active"><span>02</span><div><strong>Ảnh quét</strong><small>Tải ảnh PCB cần kiểm tra</small></div></div>
         <ArrowRight size={17} className="workflow-arrow" />
-        <div className="workflow-step"><span>03</span><div><strong>Đối chiếu QA</strong><small>Thiếu / thừa / đạt chuẩn</small></div></div>
+        <div className="workflow-step"><span>03</span><div><strong>Đối chiếu QA</strong><small>Kiểm tra thiếu linh kiện</small></div></div>
       </div>
       <div className="panel-card inspect-card">
         <div className="section-title"><div><h2><ScanLine size={19} /> Ảnh mạch cần quét</h2><p>Ảnh chụp rõ nét, nhìn thấy toàn bộ vùng linh kiện trên PCB</p></div><button className="button button-light button-small" onClick={useSample}><ImagePlus size={15} /> Dùng ảnh mẫu</button></div>
@@ -48,8 +48,8 @@ export default function InspectPanel() {
             <div className="option-heading"><Sparkles size={16} /> Tham số kiểm tra</div>
             <label className="field-label">Độ tin cậy YOLO <strong>{Math.round(conf * 100)}%</strong></label>
             <input type="range" min="0.1" max="0.9" step="0.05" value={conf} onChange={(event) => setConf(Number(event.target.value))} />
-            <label className="field-label">Dung sai vị trí <strong>{(tolerance * 100).toFixed(1)}%</strong></label>
-            <input type="range" min="0.01" max="0.12" step="0.005" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
+            <label className="field-label">Dung sai độ lệch vị trí <strong>{Math.round(tolerance * 100)}%</strong></label>
+            <input type="range" min="0.05" max="0.80" step="0.05" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
             <div
               className={`toggle-crop-card ${autoCrop ? "active" : ""}`}
               onClick={() => setAutoCrop((prev) => !prev)}

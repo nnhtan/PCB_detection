@@ -61,6 +61,66 @@ async def select_reference(request: Request, reference_id: str = Form(...)):
     }
 
 
+@router.delete("/reference/unused/all")
+@router.post("/reference/cleanup-unused")
+async def delete_unused_references(request: Request):
+    catalog = get_reference_catalog(request)
+    try:
+        result = await run_in_threadpool(catalog.delete_unused)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    count = result["deleted_count"]
+    if count == 0:
+        message = "Không có mạch tham chiếu nào chưa sử dụng để xóa."
+    else:
+        message = f"Đã xóa thành công {count} mạch tham chiếu không sử dụng."
+    if result.get("warnings"):
+        message += f" (Lưu ý: {'; '.join(result['warnings'])})"
+
+    return {
+        "status": "success",
+        "message": message,
+        "deleted_count": count,
+        "deleted_references": result["deleted_references"],
+        "active_reference_id": catalog.snapshot()["active_reference_id"],
+    }
+
+
+@router.delete("/reference/{reference_id}")
+async def delete_reference(request: Request, reference_id: str):
+    catalog = get_reference_catalog(request)
+    try:
+        result = await run_in_threadpool(catalog.delete, reference_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    reference = result["reference"]
+    message = f"Đã xóa mạch tham chiếu: {reference['name']}"
+    if result.get("was_active"):
+        if result["active_reference_id"] is not None:
+            active = next(
+                item
+                for item in catalog.snapshot()["references"]
+                if item["id"] == result["active_reference_id"]
+            )
+            message += f". Đã chuyển sang mạch: {active['name']}"
+        else:
+            message += ". Chưa có mạch tham chiếu nào được chọn"
+    if result.get("cleanup_warning"):
+        message += f". {result['cleanup_warning']}"
+
+    return {
+        "status": "success",
+        "message": message,
+        "deleted_reference_id": reference["id"],
+        "active_reference_id": result["active_reference_id"],
+        "warning": result.get("cleanup_warning"),
+    }
+
+
 @router.post("/reference/update")
 async def update_reference(
     request: Request,

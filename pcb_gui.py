@@ -289,7 +289,7 @@ class InferenceWorker(QThread):
                 if not Path(ref_json).exists():
                     ref_json = "reference_components.json"
                 if not Path(ref_img).exists():
-                    ref_img = "2.jpg"
+                    ref_img = "Image_20261019190958053.bmp"
 
                 if Path(ref_json).exists() and Path(ref_img).exists():
                     from backend.app.services.pcb_engine import PCBPipeline
@@ -928,8 +928,7 @@ class PCBMainWindow(QMainWindow):
             status_color = "#10b981"
         elif qa_status == "FAULTY":
             missing = data["missing_count"]
-            extra = data["extra_count"]
-            status_text = f"❌ LỖI (FAULTY) - Thiếu: {missing}, Thừa: {extra}"
+            status_text = f"❌ LỖI (FAULTY) - Thiếu {missing} linh kiện"
             status_color = "#ef4444"
         elif qa_status == "UNALIGNED":
             status_text = f"⚠️ ĐÃ TÌM THẤY {total} LINH KIỆN (CHƯA CĂN CHỈNH)"
@@ -1111,7 +1110,7 @@ class PCBMainWindow(QMainWindow):
                     self,
                     "Hoàn Tất",
                     "Đã lưu thành công bo mạch này làm Mạch Chuẩn mới!\n"
-                    "Bây giờ khi kiểm tra các bo mạch cùng loại, hệ thống sẽ tự động so sánh thiếu/thừa linh kiện."
+                    "Bây giờ khi kiểm tra các bo mạch cùng loại, hệ thống sẽ tự động so sánh phát hiện thiếu linh kiện."
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Lỗi", f"Không thể lưu mạch chuẩn: {e}")

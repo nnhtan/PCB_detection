@@ -55,13 +55,14 @@ class PCBMonoCropper:
         self,
         model_path: Optional[str] = None,
         conf_thresh: float = 0.25,
-        inference_size: int = 800
+        inference_size: int = 800,
+        model = None,
     ):
         self.conf_thresh = conf_thresh
         self.inference_size = inference_size
-        self.model = None
+        self.model = model
 
-        if HAS_YOLO:
+        if self.model is None and HAS_YOLO:
             candidates = [
                 model_path,
                 "best.pt",
@@ -180,15 +181,28 @@ class PCBMonoCropper:
                 closed_roi = cv2.morphologyEx(th_roi, cv2.MORPH_CLOSE, k, iterations=2)
 
                 cnts_roi, _ = cv2.findContours(closed_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                comp_w = c_x2 - c_x1
+                comp_h = c_y2 - c_y1
                 if cnts_roi:
                     largest_roi = max(cnts_roi, key=cv2.contourArea)
                     (lcx, lcy), (lw, lh), angle = cv2.minAreaRect(largest_roi)
                     gcx = lcx + rx1
                     gcy = lcy + ry1
-                    full_rect = ((gcx, gcy), (lw, lh), angle)
+                    if (lw * lh) >= (comp_w * comp_h * 0.55):
+                        full_rect = ((gcx, gcy), (lw, lh), angle)
+                    else:
+                        pad_x = max(24, int(comp_w * 0.12))
+                        pad_y = max(24, int(comp_h * 0.12))
+                        bx1, by1 = max(0, c_x1 - pad_x), max(0, c_y1 - pad_y)
+                        bx2, by2 = min(orig_w, c_x2 + pad_x), min(orig_h, c_y2 + pad_y)
+                        full_rect = (((bx1 + bx2) / 2.0, (by1 + by2) / 2.0), (bx2 - bx1, by2 - by1), 0.0)
                 else:
                     # Dự phòng theo cụm linh kiện
-                    full_rect = (((c_x1 + c_x2) / 2.0, (c_y1 + c_y2) / 2.0), (c_x2 - c_x1 + 80, c_y2 - c_y1 + 80), 0.0)
+                    pad_x = max(24, int(comp_w * 0.12))
+                    pad_y = max(24, int(comp_h * 0.12))
+                    bx1, by1 = max(0, c_x1 - pad_x), max(0, c_y1 - pad_y)
+                    bx2, by2 = min(orig_w, c_x2 + pad_x), min(orig_h, c_y2 + pad_y)
+                    full_rect = (((bx1 + bx2) / 2.0, (by1 + by2) / 2.0), (bx2 - bx1, by2 - by1), 0.0)
 
                 box_orig = cv2.boxPoints(full_rect).astype(np.float32)
                 ordered_corners = self.order_corners(box_orig)
@@ -205,8 +219,11 @@ class PCBMonoCropper:
                 M = cv2.getPerspectiveTransform(ordered_corners, dst_pts)
                 cropped = cv2.warpPerspective(img_input, M, (maxW, maxH))
 
-                if maxW > maxH * 1.3:
+                # Bo mạch chuẩn luôn xuất dạng nằm ngang (w >= h)
+                if maxH > maxW:
                     cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+                    R = np.array([[0, -1, maxH - 1], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
+                    M = R @ M
                     maxW, maxH = maxH, maxW
 
                 t_elapsed = (time.perf_counter() - t_start) * 1000
@@ -214,6 +231,7 @@ class PCBMonoCropper:
                 info["status_msg"] = f"Phát hiện PCB (Góc {full_rect[2]:.1f}°, {maxW}x{maxH}px)"
                 info["time_ms"] = t_elapsed
                 info["corners"] = ordered_corners
+                info["transform"] = M
                 info["angle"] = full_rect[2]
                 info["crop_size"] = (maxW, maxH)
 
@@ -278,14 +296,17 @@ class PCBMonoCropper:
         M = cv2.getPerspectiveTransform(ordered_corners, dst_pts)
         cropped = cv2.warpPerspective(img_input, M, (maxW, maxH))
 
-        if maxW > maxH * 1.3:
+        if maxH > maxW:
             cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+            R = np.array([[0, -1, maxH - 1], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
+            M = R @ M
             maxW, maxH = maxH, maxW
 
         info["success"] = True
         info["status_msg"] = f"Phát hiện PCB (Góc {angle:.1f}°, {maxW}x{maxH}px)"
         info["time_ms"] = (time.perf_counter() - t_start) * 1000
         info["corners"] = ordered_corners
+        info["transform"] = M
         info["angle"] = angle
         info["crop_size"] = (maxW, maxH)
 

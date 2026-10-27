@@ -2,7 +2,7 @@
   "image": "reference.jpg",
   "image_width": 1628,
   "image_height": 781,
-  "components_count": 13,
+  "components_count": 11,
   "components": [
     {
       "id": 1,
@@ -78,22 +78,6 @@
     },
     {
       "id": 10,
-      "class_id": 15,
-      "class": "resistor",
-      "confidence_reference": 0.6747,
-      "x": 691.38,
-      "y": 490.14
-    },
-    {
-      "id": 11,
-      "class_id": 15,
-      "class": "resistor",
-      "confidence_reference": 0.6554,
-      "x": 627.4,
-      "y": 495.49
-    },
-    {
-      "id": 12,
       "class_id": 12,
       "class": "inductor",
       "confidence_reference": 0.5891,
@@ -101,7 +85,7 @@
       "y": 117.49
     },
     {
-      "id": 13,
+      "id": 11,
       "class_id": 15,
       "class": "resistor",
       "confidence_reference": 0.5666,

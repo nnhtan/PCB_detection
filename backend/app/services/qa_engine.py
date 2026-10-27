@@ -15,7 +15,7 @@ def compare_with_reference(
     conf_thresh: float = 0.25,
 ) -> dict[str, Any]:
     matches, _, used_references = match_components(
-        reference, detections, tolerance, require_same_class=False
+        reference, detections, tolerance, require_same_class=True
     )
     status, stats = evaluate_board_status(
         reference,

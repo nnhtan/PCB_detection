@@ -22,7 +22,7 @@ export default function DetectPanel() {
         <div className="detect-grid">
           <UploadCard title="Tải ảnh PCB" description="PNG, JPG hoặc JPEG · tối đa 32 MB" onSelect={pick} preview={preview} />
           <div className="detect-side">
-            <div className="helper-box"><strong>Nhận diện thuần</strong><p>YOLO xác định vị trí và loại linh kiện. Để kiểm tra thiếu/thừa, hãy dùng trang Kiểm tra PCB và nạp mạch chuẩn.</p></div>
+            <div className="helper-box"><strong>Nhận diện thuần</strong><p>YOLO xác định vị trí và loại linh kiện. Để kiểm tra thiếu linh kiện, hãy dùng trang Kiểm tra PCB và nạp mạch chuẩn.</p></div>
             <div
               className={`toggle-crop-card ${autoCrop ? "active" : ""}`}
               onClick={() => setAutoCrop((prev) => !prev)}

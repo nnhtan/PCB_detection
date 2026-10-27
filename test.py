@@ -34,7 +34,7 @@ REFERENCE_JSON = str(BACKEND_STORAGE / "reference_components.json")
 REFERENCE_IMAGE = str(
     (BACKEND_STORAGE / "reference.jpg")
     if (BACKEND_STORAGE / "reference.jpg").is_file()
-    else (PROJECT_DIR / "2.jpg")
+    else (PROJECT_DIR / "Image_20261019190958053.bmp")
 )
 
 # Camera điện thoại Android IP Webcam (hoặc SOURCE = 0 cho webcam máy tính)
@@ -67,14 +67,14 @@ CONTRAST_ALPHA = 1.15
 CONTRAST_BETA = -10
 
 # ---- YOLO (PHẢI GIỐNG machpcbgoc.py) ----
-CONF = 0.25
+CONF = 0.35
 IMGSZ = 1536
 MAX_DET = 1000
 USE_CUDA = torch is not None and torch.cuda.is_available()
 DEVICE = 0 if USE_CUDA else "cpu"
 
 # ---- So sánh vị trí ----
-MATCH_TOLERANCE_RATIO = 0.045
+MATCH_TOLERANCE_RATIO = 0.08
 MISSING_ALLOWED = 0
 EXTRA_MIN_CONF = 0.50
 

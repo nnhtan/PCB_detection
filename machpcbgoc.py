@@ -17,14 +17,14 @@ MODEL_PATH = (
     if (PROJECT_DIR / "backend" / "models" / "best.pt").is_file()
     else PROJECT_DIR / "best.pt"
 )
-REFERENCE_IMAGE = PROJECT_DIR / "2.jpg"
+REFERENCE_IMAGE = PROJECT_DIR / "Image_20261019190958053.bmp"
 
 REFERENCE_OUTPUT_IMAGE = BACKEND_STORAGE / "reference.jpg"
 OUTPUT_JSON = BACKEND_STORAGE / "reference_components.json"
 OUTPUT_IMAGE = BACKEND_STORAGE / "reference_detected.jpg"
 
-CONF = 0.25
-IMGSZ = 960
+CONF = 0.35
+IMGSZ = 1536
 DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 # Nếu model của bạn dùng tên class khác, không cần sửa phần này.
@@ -84,6 +84,14 @@ def create_reference_map():
     else:
         boxes = result.boxes
 
+        # Thu thập các hộp IC để lọc bỏ nhận diện giả trên chân/thân IC
+        ic_boxes = []
+        for idx in range(len(boxes)):
+            cls_id = int(boxes.cls[idx].item())
+            if str(model.names[cls_id]).lower() == "ic":
+                ic_boxes.append(boxes.xyxy[idx].cpu().numpy().tolist())
+
+        comp_idx = 1
         for idx in range(len(boxes)):
             x1, y1, x2, y2 = boxes.xyxy[idx].cpu().numpy().tolist()
 
@@ -95,14 +103,22 @@ def create_reference_map():
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
 
+            # Loại bỏ nhận diện giả (ví dụ: resistor nhận diện nhầm trên chân kim loại của IC)
+            if class_name.lower() != "ic" and any(
+                b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in ic_boxes
+            ):
+                print(f"[FILTER] Bỏ nhận diện giả trên chân IC: {class_name} tại ({cx:.1f}, {cy:.1f})")
+                continue
+
             component = {
-                "id": idx + 1,
+                "id": comp_idx,
                 "class_id": cls_id,
                 "class": class_name,
                 "confidence_reference": round(conf, 4),
                 "x": round(cx, 2),
                 "y": round(cy, 2),
             }
+            comp_idx += 1
             components.append(component)
 
             label = f"{class_name} {conf:.2f}"
@@ -143,12 +159,20 @@ def create_reference_map():
     with open(OUTPUT_JSON, "w", encoding="utf-8") as output_file:
         json.dump(output_data, output_file, ensure_ascii=False, indent=2)
 
-    if not cv2.imwrite(OUTPUT_IMAGE, annotated):
+    # Đồng bộ ra thư mục gốc
+    root_json = PROJECT_DIR / "reference_components.json"
+    with open(root_json, "w", encoding="utf-8") as root_file:
+        json.dump(output_data, root_file, ensure_ascii=False, indent=2)
+
+    if not cv2.imwrite(str(OUTPUT_IMAGE), annotated):
         raise RuntimeError(f"Không lưu được ảnh kết quả: {OUTPUT_IMAGE}")
+    
+    root_detected = PROJECT_DIR / "reference_detected.jpg"
+    cv2.imwrite(str(root_detected), annotated)
 
     print(f"[INFO] Detected components: {len(components)}")
-    print(f"[INFO] Saved component map: {OUTPUT_JSON}")
-    print(f"[INFO] Saved annotated image: {OUTPUT_IMAGE}")
+    print(f"[INFO] Saved component map: {OUTPUT_JSON} & {root_json}")
+    print(f"[INFO] Saved annotated image: {OUTPUT_IMAGE} & {root_detected}")
 
 
 if __name__ == "__main__":

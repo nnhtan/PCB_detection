@@ -89,17 +89,36 @@ def run_detection(
     detected_classes = []
     detection_details = []
 
+    # Thu thập các hộp IC để lọc bỏ nhận diện giả trên chân/thân IC
+    ic_boxes = []
+    for box in boxes:
+        cls_id = int(box.cls[0].item())
+        cls_name = class_names.get(cls_id, f"class_{cls_id}").lower()
+        if cls_name == "ic":
+            ic_boxes.append(box.xyxy[0].cpu().numpy().tolist())
+
+    valid_boxes = []
     for box in boxes:
         cls_id = int(box.cls[0].item())
         cls_name = class_names.get(cls_id, f"class_{cls_id}")
         confidence = float(box.conf[0].item())
         xyxy = box.xyxy[0].cpu().numpy().tolist()
+        cx = (xyxy[0] + xyxy[2]) / 2.0
+        cy = (xyxy[1] + xyxy[3]) / 2.0
+
+        # Lọc bỏ nhận diện giả trên chân IC
+        if cls_name.lower() != "ic" and any(b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in ic_boxes):
+            continue
+
+        valid_boxes.append(box)
         detected_classes.append(cls_name)
         detection_details.append({
             "class": cls_name,
             "confidence": round(confidence, 4),
             "bbox": [round(x, 1) for x in xyxy]
         })
+
+    print(f"\n=> SỐ LINH KIỆN HỢP LỆ (ĐÃ LỌC BỎ NHẬN DIỆN GIẢ TRÊN IC): {len(valid_boxes)}")
 
     counter = Counter(detected_classes)
     print("\n--- BẢNG THỐNG KÊ CHI TIẾT THEO LOẠI LINH KIỆN ---")
@@ -109,10 +128,15 @@ def run_detection(
         print(f"{idx:<5} | {name:<25} | {count:<10}")
     print("-" * 46)
 
-    # 5. Vẽ Bounding Boxes và lưu ảnh kết quả
-    annotated_image = result.plot()
+    # 5. Vẽ Bounding Boxes cho các linh kiện hợp lệ
+    annotated_image = image.copy()
+    for d in detection_details:
+        x1, y1, x2, y2 = [int(v) for v in d["bbox"]]
+        label = f"{d['class']} {d['confidence']:.2f}"
+        cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(annotated_image, label, (x1, max(y1 - 8, 18)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2, cv2.LINE_AA)
     cv2.imwrite(output_image_path, annotated_image)
-    print(f"\n[3] Đã lưu ảnh kết quả nhận diện (bounding box):")
+    print(f"\n[3] Đã lưu ảnh kết quả nhận diện (đã lọc sạch chân IC):")
     print(f"    -> {Path(output_image_path).resolve()}")
 
     # 6. Kiểm tra đối chiếu với mạch chuẩn (QA inspection)
@@ -125,7 +149,7 @@ def run_detection(
     if not Path(ref_json).exists():
         ref_json = "reference_components.json"
     if not Path(ref_img).exists():
-        ref_img = "2.jpg"
+        ref_img = "Image_20261019190958053.bmp"
 
     try:
         from backend.app.services.pcb_engine import PCBPipeline
@@ -145,23 +169,27 @@ def run_detection(
         status = qa_res.get("status")
         align_method = qa_res.get("alignment_method")
         missing = qa_res.get("missing_components_details", [])
-        extra = qa_res.get("stats", {}).get("extra", 0)
+        matched = qa_res.get("stats", {}).get("matched", 0)
+        ref_count = qa_res.get("stats", {}).get("reference_count", 0)
 
         print(f"[*] Phương pháp căn chỉnh: {align_method}")
         print(f"[*] Trạng thái kiểm định: {status}")
+        print(f"[*] Số linh kiện khớp chuẩn: {matched}/{ref_count}")
         print(f"[*] Số linh kiện thiếu: {len(missing)}")
-        print(f"[*] Số linh kiện thừa: {extra}")
 
         if status == "OK":
             print("\n=> KẾT LUẬN: [ OK ] - Mạch đạt chuẩn so với mạch tham chiếu!")
         elif status == "FAULTY":
-            print("\n=> KẾT LUẬN: [ FAULTY ] - Mạch bị lỗi (thiếu/thừa hoặc lệch linh kiện)!")
+            print("\n=> KẾT LUẬN: [ FAULTY ] - Mạch bị lỗi: Thiếu linh kiện!")
             if missing:
-                print("   Các linh kiện bị thiếu:")
-                for m in missing[:10]:
-                    print(f"    - ID {m.get('id')}: {m.get('class')} tại tọa độ chuẩn ({m.get('x')}, {m.get('y')})")
+                print("   Các linh kiện bị thiếu cần bổ sung:")
+                for m in missing[:15]:
+                    m_id = m.get('id') or m.get('ref_id')
+                    m_x = m.get('x') or m.get('ref_x')
+                    m_y = m.get('y') or m.get('ref_y')
+                    print(f"    - ID {m_id}: {m.get('class')} tại tọa độ chuẩn ({m_x}, {m_y})")
         else:
-            print("\n=> KẾT LUẬN: [ UNALIGNED ] - Đã nhận diện 55 linh kiện, nhưng chưa căn chỉnh được góc mạch với mạch chuẩn hiện tại.")
+            print("\n=> KẾT LUẬN: [ UNALIGNED ] - Chưa căn chỉnh được góc mạch với mạch tham chiếu hiện tại.")
 
         if "annotated_image" in qa_res and qa_res["annotated_image"] is not None:
             qa_output = "result_inspection.jpg"

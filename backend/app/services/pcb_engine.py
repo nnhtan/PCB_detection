@@ -21,9 +21,9 @@ DEFAULT_REF_IMAGE = "Image_20261019190958053.bmp"
 
 DEFAULT_CONF = 0.35
 DEFAULT_IMGSZ = 1536
-DEFAULT_TOLERANCE_RATIO = 0.55
+DEFAULT_TOLERANCE_RATIO = 0.15
 DEFAULT_MISSING_ALLOWED = 0
-DEFAULT_EXTRA_ALLOWED = 2
+DEFAULT_EXTRA_ALLOWED = 0
 DEFAULT_EXTRA_MIN_CONF = 0.50
 
 ORB_FEATURES = 2000
@@ -42,6 +42,7 @@ BOARD_PADDING_RATIO = 0.05
 STATUS_OK = "OK"
 STATUS_FAULTY = "FAULTY"
 STATUS_UNALIGNED = "UNALIGNED"
+STATUS_NO_BOARD = "NO_BOARD"
 
 CLASS_ALIASES = {
     "potentiometer": "inductor/potentiometer",
@@ -256,7 +257,16 @@ class OrbAligner:
     def compute_homography(self, frame):
         if not self.valid:
             return None
-        gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        fh, fw = frame.shape[:2]
+        # Tối ưu hóa: Thu nhỏ ảnh về max 1024px để ORB chạy < 20ms (thay vì 250ms trên ảnh 10MP)
+        scale = 1.0
+        if max(fh, fw) > 1024:
+            scale = 1024.0 / max(fh, fw)
+            proc_frame = cv2.resize(frame, (int(fw * scale), int(fh * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            proc_frame = frame
+
+        gray = cv2.equalizeHist(cv2.cvtColor(proc_frame, cv2.COLOR_BGR2GRAY))
         frame_kp, frame_desc = self.orb.detectAndCompute(gray, None)
         if frame_desc is None or frame_kp is None or len(frame_kp) < MIN_GOOD_MATCHES:
             return None
@@ -267,7 +277,7 @@ class OrbAligner:
         good = [pair[0] for pair in matches if len(pair) == 2 and pair[0].distance < RATIO_TEST * pair[1].distance]
         if len(good) < MIN_GOOD_MATCHES:
             return None
-        src_pts = np.float32([frame_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        src_pts = np.float32([np.array(frame_kp[m.queryIdx].pt) / scale for m in good]).reshape(-1, 1, 2)
         dst_pts = np.float32([self.ref_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
         H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, RANSAC_THRESHOLD)
@@ -353,38 +363,50 @@ def estimate_component_alignment(reference_components, detections, tolerance, co
                 ("scale_180", np.array([[-rw / cw, 0, rw], [0, -rh / ch, rh], [0, 0, 1]], dtype=np.float64)),
             ]
             det_pts = np.float32([[d["cx"], d["cy"]] for d in valid_dets]).reshape(-1, 1, 2)
+            best_score = -float("inf")
             for _, H_cand in scale_candidates:
                 proj = cv2.perspectiveTransform(det_pts, H_cand).reshape(-1, 2)
                 matched_pairs_src = []
                 matched_pairs_dst = []
                 used_ref = set()
+                total_dist = 0.0
                 for di, (px, py) in enumerate(proj):
-                    d_cls = normalize_component_class(valid_dets[di]["class"])
                     best_dist = float("inf")
                     best_ri = None
                     for ri, r in enumerate(reference_components):
                         if ri in used_ref:
                             continue
-                        if normalize_component_class(r["class"]) == d_cls:
-                            d_val = float(np.hypot(px - float(r["x"]), py - float(r["y"])))
-                            if d_val <= tolerance and d_val < best_dist:
-                                best_dist = d_val
-                                best_ri = ri
+                        # Đối chiếu theo vị trí không gian (spatial presence), không bắt buộc trùng class
+                        d_val = float(np.hypot(px - float(r["x"]), py - float(r["y"])))
+                        if d_val <= tolerance and d_val < best_dist:
+                            best_dist = d_val
+                            best_ri = ri
                     if best_ri is not None:
                         used_ref.add(best_ri)
+                        total_dist += best_dist
                         matched_pairs_src.append([valid_dets[di]["cx"], valid_dets[di]["cy"]])
                         matched_pairs_dst.append([float(reference_components[best_ri]["x"]), float(reference_components[best_ri]["y"])])
 
-                if len(matched_pairs_src) >= 3 and len(matched_pairs_src) > best_inliers:
-                    src_arr = np.float32(matched_pairs_src)
-                    dst_arr = np.float32(matched_pairs_dst)
-                    affine, inliers = cv2.estimateAffine2D(src_arr, dst_arr, method=cv2.RANSAC, ransacReprojThreshold=tolerance)
-                    if affine is not None and inliers is not None and int(inliers.sum()) >= 3:
-                        best_inliers = len(matched_pairs_src)
-                        best_H = np.eye(3, dtype=np.float64)
-                        best_H[:2, :] = affine
+                score = len(matched_pairs_src) * 1000.0 - total_dist
+                # Thưởng điểm nếu khớp với vị trí 2 con tụ to ở 2 đầu (Ref #3 và Ref #4)
+                for ri in used_ref:
+                    r_item = reference_components[ri]
+                    if normalize_component_class(r_item.get("class", "")) == "capacitor" or r_item.get("id") in (3, 4):
+                        score += 300.0
+
+                if score > best_score and len(matched_pairs_src) >= 2:
+                    best_score = score
+                    best_inliers = len(matched_pairs_src)
+                    if len(matched_pairs_src) >= 3:
+                        src_arr = np.float32(matched_pairs_src)
+                        dst_arr = np.float32(matched_pairs_dst)
+                        affine, inliers = cv2.estimateAffine2D(src_arr, dst_arr, method=cv2.RANSAC, ransacReprojThreshold=tolerance)
+                        if affine is not None and inliers is not None and int(inliers.sum()) >= 3:
+                            best_H = np.eye(3, dtype=np.float64)
+                            best_H[:2, :] = affine
+                        else:
+                            best_H = H_cand
                     else:
-                        best_inliers = len(matched_pairs_src)
                         best_H = H_cand
 
     # 2. RANSAC dựa trên các anchor linh kiện cùng class
@@ -453,7 +475,7 @@ def estimate_component_alignment(reference_components, detections, tolerance, co
     return None
 
 
-def match_components(reference_components, detections, tolerance, require_same_class=True):
+def match_components(reference_components, detections, tolerance, require_same_class=False):
     num_ref, num_det = len(reference_components), len(detections)
     if num_ref == 0 or num_det == 0:
         return [], set(), set()
@@ -470,7 +492,10 @@ def match_components(reference_components, detections, tolerance, require_same_c
     exp_h = np.array([c.get("box_height", np.nan) for c in reference_components], dtype=np.float64)[:, None]
     box_w = (det_box[:, 2] - det_box[:, 0])[None, :]
     box_h = (det_box[:, 3] - det_box[:, 1])[None, :]
-    too_big = (box_w > 3.0 * exp_w) | (box_h > 3.0 * exp_h)
+    has_box_size = ~np.isnan(exp_w) & ~np.isnan(exp_h)
+    too_big = np.zeros_like(contains, dtype=bool)
+    if np.any(has_box_size):
+        too_big = np.where(has_box_size, (box_w > 3.0 * exp_w) | (box_h > 3.0 * exp_h), False)
     contains &= ~too_big
 
     allowed = (dist <= tolerance) | contains
@@ -599,6 +624,8 @@ class PCBPipeline:
 
         if img_path.exists():
             self.reference_image = cv2.imread(str(img_path))
+            if self.mono_cropper is not None:
+                self.mono_cropper.ref_image = self.reference_image
             if self.reference_image is not None and len(self.reference_components) > 0:
                 self._attach_reference_box_sizes()
                 try:
@@ -609,6 +636,8 @@ class PCBPipeline:
                     self.aligner = None
         else:
             self.reference_image = None
+            if self.mono_cropper is not None:
+                self.mono_cropper.ref_image = None
             self.aligner = None
 
     def _attach_reference_box_sizes(self):
@@ -697,13 +726,6 @@ class PCBPipeline:
                 cropped, info = self.mono_cropper.process(frame)
                 if info.get("success") and cropped is not None and cropped.size > 0:
                     corners = info.get("corners")
-                    if corners is not None:
-                        c_area = cv2.contourArea(corners)
-                        frame_area = frame.shape[0] * frame.shape[1]
-                        if c_area >= 0.88 * frame_area:
-                            # Frame đã là ảnh cắt sát bo mạch chuẩn, không cần warp lại làm mờ pixel
-                            return frame, np.eye(3, dtype=np.float64), "mono_cropper"
-
                     transform = info.get("transform")
                     if transform is None and corners is not None:
                         cw, ch = cropped.shape[1], cropped.shape[0]
@@ -820,7 +842,43 @@ class PCBPipeline:
             det_frame = board_crop
         raw_detections = self.detect_components(det_frame, conf=conf, imgsz=imgsz)
 
-        # 1. Thử estimate affine qua các class độc nhất & tỷ lệ kích thước
+        # Kiểm tra sự hiện diện của bo mạch trên băng chuyền:
+        # Nếu YOLO không nhận diện được linh kiện (hoặc < 2 linh kiện), chứng tỏ băng tải rỗng hoặc mạch chưa vào.
+        # Tuyệt đối không chạy đối chiếu QA để tránh báo động giả thiếu linh kiện!
+        if len(raw_detections) < 2:
+            annotated = board_crop.copy()
+            img_h, img_w = annotated.shape[:2]
+            font_scale = max(0.42, min(0.85, img_w / 600.0))
+            header_h = int(max(36, min(70, img_h * 0.18)))
+            cv2.rectangle(annotated, (0, 0), (min(img_w, int(390 * font_scale / 0.5)), header_h), (20, 20, 25), -1)
+            cv2.putText(annotated, "BANG TAI TRONG - CHO BO MACH", (8, int(header_h * 0.46)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 200, 255), 2, cv2.LINE_AA)
+            cv2.putText(annotated, "Chua phat hien bo mach PCB", (8, int(header_h * 0.86)), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.72, (200, 200, 200), 1, cv2.LINE_AA)
+
+            proc_time = round((time.time() - start_time) * 1000, 2)
+            return {
+                "status": STATUS_NO_BOARD,
+                "status_vi": "BĂNG TẢI TRỐNG (CHỜ MẠCH)",
+                "aligned": False,
+                "qa_available": False,
+                "board_present": False,
+                "alignment_method": None,
+                "crop_method": crop_method,
+                "stats": {
+                    "matched": 0,
+                    "missing": 0,
+                    "extra": 0,
+                    "missing_components": [],
+                    "extra_components": [],
+                    "reference_count": len(self.reference_components),
+                    "detected_count": len(raw_detections),
+                },
+                "class_counts": {},
+                "detections": [],
+                "missing_components_details": [],
+                "annotated_image": annotated,
+                "board_crop_image": board_crop,
+                "latency_ms": proc_time,
+            }
         H = estimate_component_alignment(
             self.reference_components, raw_detections, tolerance, conf,
             crop_shape=board_crop.shape, ref_shape=self.reference_image.shape
@@ -841,24 +899,45 @@ class PCBPipeline:
                     H = H_180 @ R180
                     align_method = "Homography (ORB 180°)"
 
+        # 3. Fallback: Căn chỉnh trực tiếp theo Scale (0° và 180°) nếu là bo mạch đã crop
+        if H is None and self.reference_image is not None and board_crop is not None:
+            ch, cw = board_crop.shape[:2]
+            rh, rw = self.reference_image.shape[:2]
+            if cw > 0 and ch > 0:
+                H0 = np.array([[rw / cw, 0, 0], [0, rh / ch, 0], [0, 0, 1]], dtype=np.float64)
+                H180 = np.array([[-rw / cw, 0, rw], [0, -rh / ch, rh], [0, 0, 1]], dtype=np.float64)
+                m0, _, _ = match_components(self.reference_components, self._map_detections(raw_detections, H0), tolerance, require_same_class=False)
+                m180, _, _ = match_components(self.reference_components, self._map_detections(raw_detections, H180), tolerance, require_same_class=False)
+                if len(m180) > len(m0):
+                    H = H180
+                    align_method = "Direct Scale (180°)"
+                else:
+                    H = H0
+                    align_method = "Direct Scale (0°)"
+
         aligned = H is not None
 
-        # Ghép linh kiện: Chỉ cần đúng loại linh kiện (class) so với mạch gốc, không cần chuẩn xác tọa độ
+        # Ghép linh kiện: Đối chiếu theo vị trí tọa độ không gian (spatial presence)
+        # KHÔNG đối chiếu class chéo nhau để tránh AI phân loại nhầm linh kiện SMD nhỏ
+        # Bán kính tìm kiếm căn cứ theo dung sai tolerance
         shown_detections = self._map_detections(raw_detections, H) if aligned else raw_detections
 
-        matches = []
-        used_references = set()
-        for di, d in enumerate(shown_detections):
-            d_cls = normalize_component_class(d["class"])
-            for ri, r in enumerate(self.reference_components):
-                if ri not in used_references and normalize_component_class(r["class"]) == d_cls:
-                    used_references.add(ri)
-                    matches.append({"det_index": di, "ref_index": ri, "distance": 0.0})
-                    break
+        matches, used_detections, used_references = match_components(
+            self.reference_components,
+            shown_detections,
+            tolerance=tolerance,
+            require_same_class=False,
+        )
 
         status, stats = evaluate_board_status(
-            self.reference_components, shown_detections, matches, used_references, aligned=True,
-            missing_allowed=missing_allowed, extra_allowed=extra_allowed, conf_thresh=conf
+            self.reference_components,
+            shown_detections,
+            matches,
+            used_references,
+            aligned=aligned,
+            missing_allowed=missing_allowed,
+            extra_allowed=extra_allowed,
+            conf_thresh=conf,
         )
         matched_detection_indices = {m["det_index"] for m in matches}
         match_map = {m["det_index"]: m["ref_index"] for m in matches}
@@ -924,20 +1003,22 @@ class PCBPipeline:
             (0, 0, 235)
         )
         status_label = {
-            STATUS_OK: "MẠCH ĐẠT CHUẨN (OK)",
-            STATUS_FAULTY: "MẠCH BỊ LỖI (THIẾU LINH KIỆN)",
-            STATUS_UNALIGNED: "ĐÃ QUÉT - CHƯA ĐỐI CHIẾU",
+            STATUS_OK: "MACH DAT CHUAN (OK)",
+            STATUS_FAULTY: "LOI: THIEU LINH KIEN",
+            STATUS_UNALIGNED: "DA QUET - CHUA DOI CHIEU",
         }[status]
 
-        header_h = 75
-        cv2.rectangle(annotated, (0, 0), (min(annotated.shape[1], 560), header_h), (20, 20, 25), -1)
-        cv2.putText(annotated, status_label, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, status_color, 2, cv2.LINE_AA)
+        img_h, img_w = annotated.shape[:2]
+        font_scale = max(0.42, min(0.85, img_w / 600.0))
+        header_h = int(max(36, min(70, img_h * 0.18)))
+        cv2.rectangle(annotated, (0, 0), (min(img_w, int(350 * font_scale / 0.5)), header_h), (20, 20, 25), -1)
+        cv2.putText(annotated, status_label, (8, int(header_h * 0.46)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, status_color, 2, cv2.LINE_AA)
 
         if aligned:
-            summary_txt = f"Khớp: {stats['matched']}/{len(self.reference_components)} | Thiếu: {stats['missing']}"
+            summary_txt = f"Khop: {stats['matched']}/{len(self.reference_components)} | Thieu: {stats['missing']}"
         else:
-            summary_txt = f"Detected: {len(raw_detections)} | QA: alignment unavailable"
-        cv2.putText(annotated, summary_txt, (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
+            summary_txt = f"Detections: {len(raw_detections)}"
+        cv2.putText(annotated, summary_txt, (8, int(header_h * 0.86)), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.72, (230, 230, 230), 1, cv2.LINE_AA)
 
         proc_time = round((time.time() - start_time) * 1000, 2)
 
@@ -950,6 +1031,7 @@ class PCBPipeline:
             }[status],
             "aligned": aligned,
             "qa_available": aligned,
+            "board_present": True,
             "alignment_method": align_method,
             "crop_method": crop_method,
             "stats": {

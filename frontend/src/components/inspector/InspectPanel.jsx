@@ -11,7 +11,7 @@ export default function InspectPanel() {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [conf, setConf] = useState(0.35);
-  const [tolerance, setTolerance] = useState(0.55);
+  const [tolerance, setTolerance] = useState(0.15);
   const [autoCrop, setAutoCrop] = useState(true);
   const reference = useAppStore((state) => state.reference);
   const { result, error, busy, inspect } = useInspect();

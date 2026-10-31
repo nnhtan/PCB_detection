@@ -1,0 +1,12 @@
+{
+  "source_type": "hikvision",
+  "source_id": 0,
+  "name": "[Hikvision GigE #0] MV-CE120-10GM",
+  "details": "IP: 169.254.52.253 | S/N: 00E46505069",
+  "resolution": [
+    4024,
+    3036
+  ],
+  "badge": "🏭 Hikvision GigE",
+  "last_updated": "2026-10-30 12:26:08"
+}

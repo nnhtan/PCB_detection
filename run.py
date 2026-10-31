@@ -139,8 +139,22 @@ def main():
 
     has_frontend = (FRONTEND_DIR / "package.json").is_file()
     if has_frontend:
-        print(f"[3/4] Đang khởi động Frontend Vite Dev Server (Port {FRONTEND_PORT})...")
+        node_modules_dir = FRONTEND_DIR / "node_modules"
         npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+        if not node_modules_dir.is_dir():
+            print("[*] Thư viện frontend chưa được cài đặt. Đang chạy 'npm install'...")
+            try:
+                subprocess.run(
+                    [npm_cmd, "install"],
+                    cwd=str(FRONTEND_DIR),
+                    shell=(sys.platform == "win32"),
+                    check=True,
+                )
+                print("[OK] Đã cài đặt xong thư viện frontend.")
+            except Exception as e:
+                print(f"[!] Không thể chạy npm install: {e}")
+
+        print(f"[3/4] Đang khởi động Frontend Vite Dev Server (Port {FRONTEND_PORT})...")
         try:
             frontend_proc = subprocess.Popen(
                 [npm_cmd, "run", "dev"],

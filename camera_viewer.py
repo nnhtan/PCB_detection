@@ -34,6 +34,12 @@ try:
 except ImportError:
     PCBMonoCropper = None
 
+# Import engine AI đối chiếu chất lượng linh kiện
+try:
+    from backend.app.services.pcb_engine import PCBPipeline
+except ImportError:
+    PCBPipeline = None
+
 # Đường dẫn đến module MvImport của Hikvision SDK
 CURRENT_DIR = Path(__file__).resolve().parent
 MV_IMPORT_PATH = CURRENT_DIR / "Python" / "MvImport"
@@ -94,6 +100,43 @@ class HikCameraViewer:
         self.cached_corners = None
         self.cached_status = "Chờ bo mạch"
         self.is_detecting = False
+
+        # Chế độ quét Realtime (YOLO + Đối chiếu QA)
+        self.pipeline = None
+        self.realtime_scan_enabled = False
+        self.is_scanning_realtime = False
+        self.latest_qa_result = None
+        self.qa_lock = threading.Lock()
+        self.scan_fps = 0.0
+        self.qa_window_name = "PCB Realtime Inspection (QA)"
+        self.conveyor_state = "WAITING"  # "WAITING" | "MOVING" | "LOCKED"
+        self.board_stats = {"ok": 0, "faulty": 0, "total": 0}
+        # Đo chuyển động & phát hiện dừng (Stationary detection)
+        self.motion_score = 0.0
+        self.motion_threshold = 2.0
+        self.is_stationary = True
+        self.consecutive_stationary_frames = 0
+        self._prev_motion_frame = None
+
+    def _init_pipeline(self):
+        """Khởi tạo PCBPipeline ngầm khi người dùng bật quét Realtime"""
+        if self.pipeline is None:
+            if PCBPipeline is None:
+                print("[LỖI] Không thể import PCBPipeline từ backend!")
+                self.set_toast("Lỗi: Thiếu module AI", 3.0)
+                return False
+            print("[AI] Đang nạp mô hình YOLO và dữ liệu mạch tham chiếu...")
+            self.set_toast("Đang nạp AI...", 3.0)
+            try:
+                self.pipeline = PCBPipeline()
+                print("[AI] PCBPipeline đã sẵn sàng cho chế độ Quét Realtime!")
+                self.set_toast("AI & QA đã sẵn sàng!", 2.0)
+                return True
+            except Exception as e:
+                print(f"[AI LỖI] Lỗi nạp PCBPipeline: {e}")
+                self.set_toast(f"Lỗi AI: {e}", 3.0)
+                return False
+        return True
 
     def set_toast(self, msg, duration=2.5):
         self.toast_msg = msg
@@ -262,6 +305,22 @@ class HikCameraViewer:
                     self.frame_count += 1
                     frames_in_second += 1
 
+                    # Đo độ dịch chuyển giữa 2 frame liên tiếp (nhanh < 0.2ms)
+                    try:
+                        small_g = cv2.resize(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY), (160, 120), interpolation=cv2.INTER_AREA)
+                        if self._prev_motion_frame is not None:
+                            diff = cv2.absdiff(small_g, self._prev_motion_frame)
+                            score = float(np.mean(diff))
+                            self.motion_score = round(score, 2)
+                            if score <= self.motion_threshold:
+                                self.consecutive_stationary_frames += 1
+                            else:
+                                self.consecutive_stationary_frames = 0
+                            self.is_stationary = (self.consecutive_stationary_frames >= 2)
+                        self._prev_motion_frame = small_g
+                    except Exception:
+                        pass
+
                 # Tính FPS thực tế của Camera
                 now = time.time()
                 if now - last_fps_calc >= 1.0:
@@ -353,6 +412,7 @@ class HikCameraViewer:
         print(" - Phím [ [ ]        : Giảm -50 ms (-50,000 µs)")
         print(" - Phím [R]          : Reset về mặc định 300,000 µs (300 ms)")
         print(" - Phím [C]          : Bật / Tắt nhận diện & cắt bo mạch PCB tự động")
+        print(" - Phím [T]          : Bật / Tắt chế độ QUÉT REALTIME (YOLO + Đối chiếu QA)")
         print(" - Phím [S] / [SPACE]: Chụp ảnh full 12MP (kèm ảnh PCB nắn thẳng)")
         print(" - Phím [Q] / [ESC]  : Thoát chương trình")
         print("=" * 60 + "\n")
@@ -372,9 +432,65 @@ class HikCameraViewer:
                     target_h = int(h * (target_w / w))
                     view = cv2.resize(display_img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-                    # Nếu bật chế độ nhận diện bo mạch PCB (chạy AI bất đồng bộ để giữ UI 60 FPS)
-                    if self.auto_crop_enabled and self.cropper:
-                        # Kích hoạt luồng quét AI ngầm nếu không bận
+                    # 1. Chế độ Quét Realtime (YOLO + Đối chiếu QA)
+                    if self.realtime_scan_enabled and self.pipeline:
+                        if not self.is_scanning_realtime:
+                            self.is_scanning_realtime = True
+                            frame_for_qa = display_img.copy()
+
+                            def _qa_worker(f):
+                                try:
+                                    t0 = time.time()
+                                    res = self.pipeline.inspect_pcb(f, conf=0.35, imgsz=1024, auto_crop=True)
+                                    dt = time.time() - t0
+                                    is_board_present = res.get("board_present", False) and res.get("status") != "NO_BOARD"
+                                    with self.qa_lock:
+                                        self.scan_fps = 1.0 / max(dt, 0.001)
+                                        if not is_board_present:
+                                            # Băng tải trống: Reset về WAITING, sẵn sàng đón mạch tiếp theo
+                                            self.conveyor_state = "WAITING"
+                                            self.latest_qa_result = res
+                                        else:
+                                            # Có bo mạch trong khung hình:
+                                            if self.conveyor_state in ("WAITING", "MOVING"):
+                                                if not self.is_stationary:
+                                                    # Mạch vẫn đang di chuyển về phía cảm biến: chưa chốt
+                                                    self.conveyor_state = "MOVING"
+                                                    self.latest_qa_result = res
+                                                else:
+                                                    # MẠCH ĐÃ DỪNG HẲN DƯỚI CẢM BIẾN: Chốt kết quả 1 lần duy nhất và cộng +1
+                                                    st = res.get("status")
+                                                    self.board_stats["total"] += 1
+                                                    if st == "OK":
+                                                        self.board_stats["ok"] += 1
+                                                    elif st == "FAULTY":
+                                                        self.board_stats["faulty"] += 1
+                                                    self.conveyor_state = "LOCKED"
+                                                    self.latest_qa_result = res
+                                                    self.set_toast(f"Mạch dừng: {'ĐẠT (OK)' if st == 'OK' else 'LỖI THIẾU'}", 2.0)
+                                            else:
+                                                # Đang khóa (mạch cũ vẫn đang đứng yên hoặc bắt đầu trôi ra): không cộng đếm lại
+                                                self.latest_qa_result = res
+                                except Exception:
+                                    pass
+                                finally:
+                                    self.is_scanning_realtime = False
+
+                            threading.Thread(target=_qa_worker, args=(frame_for_qa,), daemon=True).start()
+
+                        # Hiển thị ảnh bo mạch nắn thẳng kèm nhãn QA trên cửa sổ riêng
+                        with self.qa_lock:
+                            qa_res = self.latest_qa_result
+                        if qa_res and qa_res.get("annotated_image") is not None:
+                            annotated_view = qa_res["annotated_image"]
+                            ah, aw = annotated_view.shape[:2]
+                            target_qa_w = 760
+                            target_qa_h = int(ah * (target_qa_w / aw))
+                            qa_disp = cv2.resize(annotated_view, (target_qa_w, target_qa_h), interpolation=cv2.INTER_LINEAR)
+                            cv2.imshow(self.qa_window_name, qa_disp)
+
+                    # 2. Nếu bật nhận diện bo mạch PCB thông thường (PCBMonoCropper)
+                    elif self.auto_crop_enabled and self.cropper:
                         if not self.is_detecting:
                             self.is_detecting = True
                             frame_for_ai = display_img.copy()
@@ -403,7 +519,6 @@ class HikCameraViewer:
                             scale_factor = target_w / w
                             corners_disp = self.cached_corners * scale_factor
                             pts_int = np.int32(corners_disp)
-                            # Vẽ viền bo mạch xanh neon bám dính
                             cv2.polylines(view, [pts_int], isClosed=True, color=(0, 255, 128), thickness=2)
                             for pt in pts_int:
                                 cv2.circle(view, tuple(pt), 6, (0, 200, 255), -1)
@@ -422,6 +537,23 @@ class HikCameraViewer:
                 key = cv2.waitKey(20) & 0xFF
                 if key in (ord('q'), ord('Q'), 27):  # 27 là ESC
                     break
+                elif key in (ord('t'), ord('T')):
+                    if not self.realtime_scan_enabled:
+                        if self._init_pipeline():
+                            self.realtime_scan_enabled = True
+                            self.auto_crop_enabled = True
+                            cv2.namedWindow(self.qa_window_name, cv2.WINDOW_NORMAL)
+                            cv2.resizeWindow(self.qa_window_name, 760, 380)
+                            print("[QA] Đã BẬT chế độ Quét Realtime (YOLO + QA)")
+                            self.set_toast("QUET REALTIME: BAT", 2.0)
+                    else:
+                        self.realtime_scan_enabled = False
+                        try:
+                            cv2.destroyWindow(self.qa_window_name)
+                        except Exception:
+                            pass
+                        print("[QA] Đã TẮT chế độ Quét Realtime")
+                        self.set_toast("QUET REALTIME: TAT", 2.0)
                 elif key in (ord('c'), ord('C')):
                     self.auto_crop_enabled = not self.auto_crop_enabled
                     state_str = "BẬT" if self.auto_crop_enabled else "TẮT"
@@ -494,8 +626,47 @@ class HikCameraViewer:
         cv2.putText(view, f"Auto-Crop PCB [C]: {crop_status}", (20, 148),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.50, crop_color, 2 if self.auto_crop_enabled else 1, cv2.LINE_AA)
 
+        # Banner trạng thái Quét Realtime nếu đang bật (Góc trên bên phải)
+        if self.realtime_scan_enabled:
+            with self.qa_lock:
+                qa_res = self.latest_qa_result
+            total_cnt = self.board_stats["total"]
+            ok_cnt = self.board_stats["ok"]
+            faulty_cnt = self.board_stats["faulty"]
+
+            if self.conveyor_state == "WAITING":
+                banner_text = "● BANG TAI TRONG - CHO BO MACH..."
+                b_color = (0, 200, 255)
+            elif self.conveyor_state == "MOVING":
+                banner_text = f"● MACH DANG VAO ({self.motion_score:.1f}) - CHO CAM BIEN DUNG..."
+                b_color = (0, 215, 255)
+            else:
+                # LOCKED - đang khóa hiển thị kết quả bo mạch tại điểm dừng
+                st = qa_res.get("status") if qa_res else "UNALIGNED"
+                stats = qa_res.get("stats", {}) if qa_res else {}
+                matched = stats.get("matched", 0)
+                ref_cnt = stats.get("reference_count", 11)
+                missing = stats.get("missing", 0)
+                if st == "OK":
+                    banner_text = f"● DA CHOT: MACH DAT CHUAN (OK) [{matched}/{ref_cnt}]"
+                    b_color = (0, 220, 0)
+                elif st == "FAULTY":
+                    banner_text = f"● DA CHOT: LOI THIEU (Khop: {matched}/{ref_cnt} | Thieu: {missing})"
+                    b_color = (0, 0, 235)
+                else:
+                    banner_text = "● DA PHAT HIEN BO MACH (DANG KHOA)"
+                    b_color = (0, 200, 255)
+
+            bw = min(600, vw - 480)
+            if bw > 250:
+                cv2.rectangle(view, (vw - bw - 15, 10), (vw - 15, 82), (20, 20, 20), -1)
+                cv2.rectangle(view, (vw - bw - 15, 10), (vw - 15, 82), b_color, 2)
+                cv2.putText(view, banner_text, (vw - bw - 5, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.44, b_color, 2, cv2.LINE_AA)
+                sub_txt = f"Tong da quet: {total_cnt} (OK: {ok_cnt} | Loi: {faulty_cnt}) · {self.scan_fps:.1f} FPS"
+                cv2.putText(view, sub_txt, (vw - bw - 5, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (220, 220, 220), 1, cv2.LINE_AA)
+
         # Hướng dẫn nhanh ở góc dưới
-        cv2.putText(view, "[C]: Bat/Tat Crop | [+/-]: Chinh 10ms | [S]: Chup anh | [R]: Reset | [Q]: Thoat",
+        cv2.putText(view, "[T]: Quet Realtime | [C]: Crop PCB | [+/-]: Chinh 10ms | [S]: Chup anh | [Q]: Thoat",
                     (15, vh - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
         # Thông báo Toast nếu có

@@ -225,5 +225,13 @@ captures/
 crop_results/
 result_*.jpg
 temp_preview.jpg
+*.png
+debug_crops/
+pcb_model_crop/
+boats.jpg
+conveyor_background.jpg
+debug_inspect_orig.jpg
+pcb_template.jpg
+ref_temp.jpg
 
 

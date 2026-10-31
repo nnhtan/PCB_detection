@@ -200,17 +200,54 @@ tbody tr:last-child td { border-bottom: 0; }
 .auto-scan-controls select { height: 30px; padding: 0 6px; color: #55566a; background: white; border: 1px solid #e9e7f0; border-radius: 6px; font-size: 11px; outline: none; }
 .auto-scan-button { min-height: 30px; padding: 0 9px; color: #6854b4; background: white; border-color: #e8e3f6; font-size: 11px; }
 .auto-scan-button.active { color: white; background: #2aa875; border-color: #2aa875; }
-.camera-exposure { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; align-items: center; gap: 6px 12px; max-width: 620px; margin: 0 0 14px auto; padding: 10px 12px; background: #f8f7fc; border: 1px solid #eceaf3; border-radius: 9px; }
-.camera-exposure-label { display: flex; justify-content: space-between; gap: 12px; color: #77788b; font-size: 11px; font-weight: 600; }
-.camera-exposure-label strong { color: #5d4ab0; font-size: 12px; }
-.camera-exposure input[type="range"] { grid-column: 1; margin: 0; }
-.camera-exposure-hint { grid-column: 1 / -1; color: #89899a; font-size: 10px; }
+.camera-exposure { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; padding: 12px 14px; background: #f8f7fc; border: 1px solid #e5e2f0; border-radius: 10px; }
+.camera-exposure-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.camera-exposure-label { display: flex; align-items: center; gap: 8px; color: #55566a; font-size: 12px; font-weight: 600; }
+.camera-exposure-value { color: #5d4ab0; font-size: 14px; font-weight: 700; background: #ede8fa; padding: 2px 8px; border-radius: 6px; }
+.camera-exposure-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.camera-exposure-slider-wrap { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 240px; }
+.camera-exposure-slider-wrap input[type="range"] { flex: 1; margin: 0; cursor: pointer; accent-color: #634cb6; height: 6px; }
+.camera-exposure-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.camera-preset-btn { height: 26px; padding: 0 8px; font-size: 11px; font-weight: 500; border-radius: 5px; border: 1px solid #dcd7ed; background: white; color: #55546b; cursor: pointer; transition: all .15s; }
+.camera-preset-btn:hover { background: #ede9fa; border-color: #bfaee3; color: #433385; }
+.camera-preset-btn.active { background: #634cb6; border-color: #634cb6; color: white; }
+.camera-step-btn { height: 26px; padding: 0 7px; font-size: 11px; font-weight: 600; border-radius: 5px; border: 1px solid #dcd7ed; background: white; color: #45465b; cursor: pointer; }
+.camera-step-btn:hover { background: #f0eff7; }
+.camera-exposure-hint { color: #8e8e9f; font-size: 10px; margin-top: 2px; }
+
+/* Bảng điều khiển Crop vùng tự do (ROI) */
+.camera-roi-panel { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; padding: 12px 14px; background: #f4f8fb; border: 1px solid #d3e3ee; border-radius: 10px; }
+.camera-roi-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.camera-roi-title { display: flex; align-items: center; gap: 8px; color: #1e5270; font-size: 12px; font-weight: 700; }
+.camera-roi-status-pill { padding: 3px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; }
+.camera-roi-status-pill.active { background: #d7f5e8; color: #167a4e; border: 1px solid #b3ebcf; }
+.camera-roi-status-pill.inactive { background: #e8ecf1; color: #64748b; }
+.camera-roi-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.camera-roi-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; padding-top: 6px; border-top: 1px dashed #cfe0eb; }
+.camera-roi-input-group { display: flex; flex-direction: column; gap: 3px; }
+.camera-roi-input-group label { color: #53758c; font-size: 10px; font-weight: 600; }
+.camera-roi-input-group input[type="number"], .camera-roi-input-group input[type="range"] { height: 26px; font-size: 11px; }
+
+/* Interactive overlay for drawing ROI */
+.roi-drawing-layer { position: absolute; inset: 0; z-index: 5; cursor: crosshair; user-select: none; }
+.roi-active-box { position: absolute; border: 2px solid #00f0ff; background: rgba(0, 240, 255, 0.18); box-shadow: 0 0 10px rgba(0, 240, 255, 0.5); pointer-events: none; border-radius: 2px; }
+.roi-box-label { position: absolute; top: -22px; left: 0; background: #00f0ff; color: #0b1a24; font-size: 10px; font-weight: 800; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+.roi-guide-banner { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 6; background: rgba(15, 23, 42, 0.88); color: #00f0ff; padding: 6px 14px; border-radius: 20px; font-size: 11px; font-weight: 600; border: 1px solid rgba(0, 240, 255, 0.4); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); pointer-events: none; }
+
 .camera-workspace { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(330px, .85fr); align-items: start; gap: 14px; }
 .camera-view { position: relative; min-width: 0; min-height: 440px; overflow: hidden; background: #171821; border-radius: 9px; }
 .camera-view > img { display: block; width: 100%; height: min(68vh, 680px); min-height: 440px; object-fit: contain; }
 .camera-live-pill, .camera-fps { position: absolute; z-index: 2; top: 12px; display: flex; align-items: center; gap: 7px; padding: 7px 9px; color: white; background: #22232dcc; border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: .6px; }
 .camera-live-pill { left: 12px; }
 .camera-fps { right: 12px; color: #ddddeb; letter-spacing: 0; }
+.camera-realtime-badge { position: absolute; z-index: 3; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(16, 185, 129, 0.6); box-shadow: 0 0 16px rgba(16, 185, 129, 0.4); border-radius: 20px; color: #10b981; font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+.camera-realtime-badge.waiting { border-color: rgba(245, 158, 11, 0.6); box-shadow: 0 0 16px rgba(245, 158, 11, 0.35); color: #fbbf24; }
+.camera-realtime-badge.waiting .realtime-live-dot { background: #fbbf24; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.35); }
+.camera-realtime-badge.locked { border-color: rgba(6, 182, 212, 0.7); box-shadow: 0 0 16px rgba(6, 182, 212, 0.4); color: #22d3ee; }
+.camera-realtime-badge.locked .realtime-live-dot { background: #22d3ee; box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.35); }
+.realtime-live-dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.35); animation: realtimeBlink 1s infinite alternate; }
+@keyframes realtimeBlink { from { opacity: 0.35; transform: scale(0.9); } to { opacity: 1.0; transform: scale(1.15); } }
+.button.active-pulse { background: linear-gradient(135deg, #059669, #10b981) !important; color: white !important; border-color: #059669 !important; box-shadow: 0 0 12px rgba(16, 185, 129, 0.45); }
 .status-dot { width: 7px; height: 7px; background: #9898a7; border-radius: 50%; }
 .status-dot.online { background: #49ca8f; box-shadow: 0 0 0 3px #49ca8f32; }
 .camera-overlay { position: absolute; inset: 0; display: grid; place-items: center; background: #17182136; pointer-events: none; }
@@ -411,4 +448,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .toggle-crop-card.active .toggle-crop-card-badge {
   background: var(--purple);
   color: white;
+}
+
+.image-tag.tag-crop-success {
+  background: #ecfdf5;
+  color: #059669;
+  border: 1px solid #a7f3d0;
+  font-weight: 700;
 }

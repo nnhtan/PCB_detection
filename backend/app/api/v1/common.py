@@ -53,6 +53,7 @@ def inspection_payload(result: dict[str, Any], filename: str | None = None) -> d
         "is_ok": result["status"] == "OK",
         "aligned": result["aligned"],
         "qa_available": result["qa_available"],
+        "board_present": result.get("board_present", result["status"] != "NO_BOARD"),
         "alignment_method": result["alignment_method"],
         "crop_method": result["crop_method"],
         "stats": result["stats"],

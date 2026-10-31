@@ -28,8 +28,48 @@ export default function InspectionResults({ result }) {
       </div>
       {result.annotated_image && (
         <div className="result-image-card">
-          <div className="section-title"><div><h3>Kết quả phân tích</h3><p>Các vùng nhận diện được đánh dấu trên ảnh</p></div><span className="image-tag">{result.crop_method ? `CROP · ${result.crop_method}` : "YOLO · OpenCV"}</span></div>
-          <img className="result-image" src={result.annotated_image} alt="Ảnh PCB được chú thích kết quả" />
+          <div className="section-title">
+            <div>
+              <h3>Kết quả phân tích bo mạch</h3>
+              <p>
+                {result.crop_method === "mono_cropper"
+                  ? "Bo mạch đã được AI phát hiện, tự động cắt tách và nắn thẳng 90°"
+                  : result.crop_method === "full"
+                  ? "Đang dùng toàn bộ khung hình (Chưa tách được bo mạch riêng)"
+                  : `Cắt theo phương pháp: ${result.crop_method}`}
+              </p>
+            </div>
+            <span className={`image-tag ${result.crop_method === "mono_cropper" ? "tag-crop-success" : ""}`}>
+              {result.crop_method === "mono_cropper" ? "✓ ĐÃ CẮT & NẮN THẲNG" : `CROP · ${result.crop_method || "OpenCV"}`}
+            </span>
+          </div>
+
+          {result.crop_method === "full" && (
+            <div className="alert alert-warning" style={{ margin: "0.5rem 0 1rem 0", fontSize: "0.85rem" }}>
+              ⚠️ Thuật toán chưa bóc tách riêng được bo mạch nên đang dùng toàn bộ khung hình.
+              Gợi ý: Điều chỉnh thanh trượt <strong>Thời gian lấy sáng (Exposure)</strong> để bo mạch rõ nét hơn, hoặc bật <strong>Vùng chọn tự do (ROI)</strong>.
+            </div>
+          )}
+
+          <div className="result-image-wrapper">
+            <img className="result-image" src={result.annotated_image} alt="Ảnh PCB được chú thích kết quả" />
+          </div>
+
+          {result.board_crop_image && result.board_crop_image !== result.annotated_image && (
+            <details style={{ marginTop: "0.75rem", fontSize: "0.85rem", color: "var(--text-muted)" }}>
+              <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--purple)" }}>
+                🔍 Xem ảnh bo mạch gốc đã nắn thẳng (Chưa vẽ bounding box)
+              </summary>
+              <div style={{ marginTop: "0.5rem" }}>
+                <img
+                  className="result-image"
+                  src={result.board_crop_image}
+                  alt="Ảnh bo mạch đã nắn thẳng"
+                  style={{ maxHeight: "350px", objectFit: "contain" }}
+                />
+              </div>
+            </details>
+          )}
         </div>
       )}
       {result.detections?.length > 0 && (

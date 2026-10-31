@@ -1,0 +1,16 @@
+{
+  "bbox": [
+    1729,
+    742,
+    2666,
+    2728
+  ],
+  "orig_size": [
+    4024,
+    3036
+  ],
+  "tracking_mode": "tracking",
+  "match_threshold": 0.5,
+  "edge_snap": true,
+  "created_at": "2026-10-24 21:33:05"
+}

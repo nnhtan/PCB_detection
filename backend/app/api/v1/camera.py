@@ -60,6 +60,36 @@ def camera_set_exposure(request: Request, exposure_us: float = Form(...)):
     return {"status": "success", "camera": get_camera(request).get_status(), **exposure}
 
 
+@router.get("/camera/roi")
+def camera_get_roi(request: Request):
+    return {"status": "success", "roi": get_camera(request).get_roi()}
+
+
+@router.post("/camera/roi")
+def camera_set_roi(
+    request: Request,
+    enabled: bool = Form(...),
+    x1: float = Form(0.0),
+    y1: float = Form(0.0),
+    x2: float = Form(1.0),
+    y2: float = Form(1.0),
+    stream_crop: bool = Form(True),
+):
+    roi = get_camera(request).set_roi(
+        enabled=enabled,
+        x1=x1,
+        y1=y1,
+        x2=x2,
+        y2=y2,
+        stream_crop=stream_crop,
+    )
+    return {
+        "status": "success",
+        "roi": roi,
+        "camera": get_camera(request).get_status(),
+    }
+
+
 @router.get("/camera/stream")
 def camera_stream(request: Request):
     return StreamingResponse(
@@ -75,9 +105,10 @@ async def camera_scan(
     imgsz: int = Form(DEFAULT_IMGSZ),
     tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
     auto_crop: str | None = Form(None),
+    apply_roi: bool = Form(True),
 ):
     camera = get_camera(request)
-    frame, frame_id, fps = camera.get_frame()
+    frame, frame_id, fps = camera.get_frame(apply_roi=apply_roi)
     if frame is None:
         raise HTTPException(
             status_code=400,
@@ -95,7 +126,13 @@ async def camera_scan(
         },
     )
     payload = inspection_payload(result)
-    payload.update({"frame_id": frame_id, "camera_fps": fps})
+    payload.update({
+        "frame_id": frame_id,
+        "camera_fps": fps,
+        "is_stationary": getattr(camera, "is_stationary", True),
+        "motion_score": getattr(camera, "motion_score", 0.0),
+        "roi_applied": camera.roi.get("enabled", False) if apply_roi else False,
+    })
     return payload
 
 

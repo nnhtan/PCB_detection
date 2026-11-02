@@ -13,6 +13,11 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 ROOT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
 BACKEND_HOST = "127.0.0.1"
@@ -26,10 +31,42 @@ processes = []
 def print_banner():
     banner = r"""
 ============================================================
-       PCB VISION AI - KHỞI ĐỘNG HỆ THỐNG TỰ ĐỘNG
+       PCB VISION AI - UNIFIED LAUNCHER
 ============================================================
 """
     print(banner)
+
+
+def ensure_frontend_dependencies() -> bool:
+    """Cài đặt dependencies frontend nếu chưa có node_modules."""
+    if not (FRONTEND_DIR / "package.json").is_file():
+        return False
+
+    if (FRONTEND_DIR / "node_modules").is_dir():
+        return True
+
+    print("[!] Frontend dependencies chưa được cài đặt. Đang chạy npm install...")
+    npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+    try:
+        completed = subprocess.run(
+            [npm_cmd, "install"],
+            cwd=str(FRONTEND_DIR),
+            shell=(sys.platform == "win32"),
+            capture_output=True,
+            text=True,
+        )
+        if completed.stdout:
+            print(completed.stdout)
+        if completed.stderr:
+            print(completed.stderr)
+
+        if completed.returncode != 0:
+            print("[!] npm install thất bại. Hãy chạy 'npm install' trong thư mục frontend thủ công.")
+            return False
+        return True
+    except Exception as exc:
+        print(f"[!] Không thể cài đặt frontend dependencies ({exc}).")
+        return False
 
 
 def kill_process_tree(pid: int):
@@ -138,7 +175,7 @@ def main():
     backend_url = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
 
     has_frontend = (FRONTEND_DIR / "package.json").is_file()
-    if has_frontend:
+    if has_frontend and ensure_frontend_dependencies():
         print(f"[3/4] Đang khởi động Frontend Vite Dev Server (Port {FRONTEND_PORT})...")
         npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
         try:
@@ -150,6 +187,8 @@ def main():
             processes.append(frontend_proc)
         except Exception as e:
             print(f"[!] Không thể khởi chạy Vite dev server ({e}), sẽ dùng frontend tích hợp qua FastAPI.")
+    elif has_frontend:
+        print("[!] Frontend không thể khởi động vì dependencies chưa được cài đặt hoặc npm install thất bại.")
 
     # 4. Chờ dịch vụ sẵn sàng
     print("[4/4] Đang chờ hệ thống nạp model YOLO và sẵn sàng...")

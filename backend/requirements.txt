@@ -5,3 +5,4 @@ numpy
 opencv-python
 torch
 ultralytics
+sahi>=0.11.23

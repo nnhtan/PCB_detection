@@ -11,7 +11,7 @@ export default function InspectPanel() {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [conf, setConf] = useState(0.35);
-  const [tolerance, setTolerance] = useState(0.55);
+  const [tolerance, setTolerance] = useState(0.045);
   const [autoCrop, setAutoCrop] = useState(true);
   const reference = useAppStore((state) => state.reference);
   const { result, error, busy, inspect } = useInspect();
@@ -48,8 +48,8 @@ export default function InspectPanel() {
             <div className="option-heading"><Sparkles size={16} /> Tham số kiểm tra</div>
             <label className="field-label">Độ tin cậy YOLO <strong>{Math.round(conf * 100)}%</strong></label>
             <input type="range" min="0.1" max="0.9" step="0.05" value={conf} onChange={(event) => setConf(Number(event.target.value))} />
-            <label className="field-label">Dung sai độ lệch vị trí <strong>{Math.round(tolerance * 100)}%</strong></label>
-            <input type="range" min="0.05" max="0.80" step="0.05" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
+            <label className="field-label">Dung sai độ lệch vị trí <strong>{(tolerance * 100).toFixed(1)}%</strong></label>
+            <input type="range" min="0.01" max="0.15" step="0.005" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
             <div
               className={`toggle-crop-card ${autoCrop ? "active" : ""}`}
               onClick={() => setAutoCrop((prev) => !prev)}

@@ -61,7 +61,13 @@ def test_backend() -> None:
     if reference.get("components_count", 0):
         inspected = post_image("/api/inspect", SAMPLE_PATH, {"conf": "0.25"})
         assert inspected["status"] == "success"
-        assert "qa_available" in inspected
+        assert {
+            "aligned",
+            "qa_available",
+            "alignment_method",
+            "alignment_error",
+            "orientation_transform",
+        } <= inspected.keys()
     print(
         "FastAPI smoke test passed:",
         f"{detected['total_count']} detections,",

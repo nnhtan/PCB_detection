@@ -95,6 +95,102 @@ class PCBMonoCropper:
 
         return rect
 
+    def crop_component_cluster(self, image: np.ndarray, boxes: np.ndarray):
+        image_height, image_width = image.shape[:2]
+        valid_boxes = []
+        for box in boxes:
+            x1, y1, x2, y2 = np.asarray(box, dtype=np.float32).reshape(4)
+            box_width = x2 - x1
+            box_height = y2 - y1
+            if (not np.all(np.isfinite([x1, y1, x2, y2]))
+                    or box_width < 2 or box_height < 2
+                    or box_width * box_height > 0.25 * image_width * image_height):
+                continue
+            valid_boxes.append([
+                [x1, y1],
+                [x2, y1],
+                [x2, y2],
+                [x1, y2],
+            ])
+
+        if len(valid_boxes) < 3:
+            return None, None, None
+
+        component_points = np.asarray(valid_boxes, dtype=np.float32).reshape(-1, 2)
+        hull = cv2.convexHull(component_points)
+        rect = cv2.minAreaRect(hull)
+        rect_width, rect_height = rect[1]
+        if rect_width < 2 or rect_height < 2:
+            return None, None, None
+
+        padding = max(2, int(round(max(rect_width, rect_height) * 0.025)))
+        corners = None
+        while padding > 0:
+            expanded_rect = (
+                rect[0],
+                (rect_width + 2 * padding, rect_height + 2 * padding),
+                rect[2],
+            )
+            candidate_corners = cv2.boxPoints(expanded_rect)
+            if (
+                np.all(candidate_corners[:, 0] >= 0)
+                and np.all(candidate_corners[:, 0] <= image_width - 1)
+                and np.all(candidate_corners[:, 1] >= 0)
+                and np.all(candidate_corners[:, 1] <= image_height - 1)
+            ):
+                corners = candidate_corners
+                break
+            padding //= 2
+
+        if corners is None:
+            corners = cv2.boxPoints(rect)
+            if (
+                np.any(corners[:, 0] < 0)
+                or np.any(corners[:, 0] > image_width - 1)
+                or np.any(corners[:, 1] < 0)
+                or np.any(corners[:, 1] > image_height - 1)
+            ):
+                return None, None, None
+
+        ordered_corners = self.order_corners(corners.astype(np.float32))
+        top_left, top_right, bottom_right, bottom_left = ordered_corners
+        crop_width = int(max(
+            np.linalg.norm(bottom_right - bottom_left),
+            np.linalg.norm(top_right - top_left),
+        ))
+        crop_height = int(max(
+            np.linalg.norm(top_right - bottom_right),
+            np.linalg.norm(top_left - bottom_left),
+        ))
+        if crop_width < 2 or crop_height < 2:
+            return None, None, None
+
+        destination = np.array([
+            [0, 0],
+            [crop_width - 1, 0],
+            [crop_width - 1, crop_height - 1],
+            [0, crop_height - 1],
+        ], dtype=np.float32)
+        transform = cv2.getPerspectiveTransform(ordered_corners, destination)
+        cropped = cv2.warpPerspective(image, transform, (crop_width, crop_height))
+
+        if crop_height > crop_width:
+            cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+            rotate_transform = np.array([
+                [0, -1, crop_height - 1],
+                [1, 0, 0],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            transform = rotate_transform @ transform
+            crop_width, crop_height = crop_height, crop_width
+
+        return cropped, {
+            "corners": ordered_corners,
+            "transform": transform,
+            "angle": rect[2],
+            "crop_size": (crop_width, crop_height),
+        }, rect
+
     def process(self, img_input: np.ndarray, return_debug: bool = False) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
         """
         Nhận diện và cắt DUY NHẤT bo mạch PCB, nắn thẳng góc xoay, loại bỏ băng tải.
@@ -137,108 +233,29 @@ class PCBMonoCropper:
                 verbose=False
             )
 
-            valid_boxes = []
-            if results and len(results[0].boxes) > 0:
-                for b in results[0].boxes:
-                    xyxy = b.xyxy[0].cpu().numpy()
-                    bw = xyxy[2] - xyxy[0]
-                    bh = xyxy[3] - xyxy[1]
-                    # Loại bỏ các box phát hiện nhầm khổng lồ (ray cơ khí)
-                    if bw < (orig_w * 0.40) and bh < (orig_h * 0.45):
-                        valid_boxes.append(xyxy)
-
-            # Nếu có từ 2 linh kiện trở lên -> Chắc chắn có bo mạch PCB!
-            if len(valid_boxes) >= 2:
-                v_boxes = np.array(valid_boxes)
-                c_x1 = int(v_boxes[:, 0].min())
-                c_y1 = int(v_boxes[:, 1].min())
-                c_x2 = int(v_boxes[:, 2].max())
-                c_y2 = int(v_boxes[:, 3].max())
-
-                # Tạo vùng quan sát cục bộ (Local ROI) bao quanh PCB
-                pad = int(max(c_x2 - c_x1, c_y2 - c_y1) * 0.28)
-                rx1 = max(0, c_x1 - pad)
-                ry1 = max(0, c_y1 - pad)
-                rx2 = min(orig_w, c_x2 + pad)
-                ry2 = min(orig_h, c_y2 + pad)
-
-                local_gray = gray[ry1:ry2, rx1:rx2]
-
-                # Phân đoạn tách phíp PCB khỏi mặt băng tải trong vùng cục bộ
-                blur_roi = cv2.bilateralFilter(local_gray, 7, 50, 50)
-                # Ngưỡng cục bộ
-                bg_s = np.concatenate([
-                    blur_roi[:15, :15].ravel(), blur_roi[:15, -15:].ravel(),
-                    blur_roi[-15:, :15].ravel(), blur_roi[-15:, -15:].ravel()
-                ])
-                bg_val = float(np.median(bg_s))
-                th_val = max(38.0, min(80.0, bg_val + 10.0))
-                _, th_roi = cv2.threshold(blur_roi, int(th_val), 255, cv2.THRESH_BINARY)
-
-                # Phép đóng kết nối khối
-                ksize = max(9, int(min(local_gray.shape[:2]) * 0.035)) | 1
-                k = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
-                closed_roi = cv2.morphologyEx(th_roi, cv2.MORPH_CLOSE, k, iterations=2)
-
-                cnts_roi, _ = cv2.findContours(closed_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                comp_w = c_x2 - c_x1
-                comp_h = c_y2 - c_y1
-                if cnts_roi:
-                    largest_roi = max(cnts_roi, key=cv2.contourArea)
-                    (lcx, lcy), (lw, lh), angle = cv2.minAreaRect(largest_roi)
-                    gcx = lcx + rx1
-                    gcy = lcy + ry1
-                    if (lw * lh) >= (comp_w * comp_h * 0.55):
-                        full_rect = ((gcx, gcy), (lw, lh), angle)
-                    else:
-                        pad_x = max(24, int(comp_w * 0.12))
-                        pad_y = max(24, int(comp_h * 0.12))
-                        bx1, by1 = max(0, c_x1 - pad_x), max(0, c_y1 - pad_y)
-                        bx2, by2 = min(orig_w, c_x2 + pad_x), min(orig_h, c_y2 + pad_y)
-                        full_rect = (((bx1 + bx2) / 2.0, (by1 + by2) / 2.0), (bx2 - bx1, by2 - by1), 0.0)
-                else:
-                    # Dự phòng theo cụm linh kiện
-                    pad_x = max(24, int(comp_w * 0.12))
-                    pad_y = max(24, int(comp_h * 0.12))
-                    bx1, by1 = max(0, c_x1 - pad_x), max(0, c_y1 - pad_y)
-                    bx2, by2 = min(orig_w, c_x2 + pad_x), min(orig_h, c_y2 + pad_y)
-                    full_rect = (((bx1 + bx2) / 2.0, (by1 + by2) / 2.0), (bx2 - bx1, by2 - by1), 0.0)
-
-                box_orig = cv2.boxPoints(full_rect).astype(np.float32)
-                ordered_corners = self.order_corners(box_orig)
-
-                # Nắn thẳng phối cảnh
-                (tl, tr, br, bl) = ordered_corners
-                maxW = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
-                maxH = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
-
-                dst_pts = np.array([
-                    [0, 0], [maxW - 1, 0], [maxW - 1, maxH - 1], [0, maxH - 1]
-                ], dtype=np.float32)
-
-                M = cv2.getPerspectiveTransform(ordered_corners, dst_pts)
-                cropped = cv2.warpPerspective(img_input, M, (maxW, maxH))
-
-                # Bo mạch chuẩn luôn xuất dạng nằm ngang (w >= h)
-                if maxH > maxW:
-                    cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
-                    R = np.array([[0, -1, maxH - 1], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
-                    M = R @ M
-                    maxW, maxH = maxH, maxW
-
+            boxes = (
+                results[0].boxes.xyxy.cpu().numpy()
+                if results and results[0].boxes is not None
+                else np.empty((0, 4), dtype=np.float32)
+            )
+            cropped, crop_info, rectangle = self.crop_component_cluster(
+                img_input, boxes
+            )
+            if cropped is not None and crop_info is not None:
                 t_elapsed = (time.perf_counter() - t_start) * 1000
                 info["success"] = True
-                info["status_msg"] = f"Phát hiện PCB (Góc {full_rect[2]:.1f}°, {maxW}x{maxH}px)"
+                crop_width, crop_height = crop_info["crop_size"]
+                info["status_msg"] = (
+                    f"Phát hiện PCB (Góc {rectangle[2]:.1f}°, "
+                    f"{crop_width}x{crop_height}px)"
+                )
                 info["time_ms"] = t_elapsed
-                info["corners"] = ordered_corners
-                info["transform"] = M
-                info["angle"] = full_rect[2]
-                info["crop_size"] = (maxW, maxH)
+                info.update(crop_info)
 
                 if return_debug:
                     debug_vis = cv2.resize(img_input, (1280, int(orig_h * (1280 / orig_w))))
                     sf = 1280.0 / orig_w
-                    pts_disp = np.int32(ordered_corners * sf)
+                    pts_disp = np.int32(crop_info["corners"] * sf)
                     cv2.polylines(debug_vis, [pts_disp], isClosed=True, color=(0, 255, 0), thickness=2)
                     for pt in pts_disp:
                         cv2.circle(debug_vis, tuple(pt), 6, (0, 200, 255), -1)

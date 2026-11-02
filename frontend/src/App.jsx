@@ -29,8 +29,8 @@ export default function App() {
   useEffect(() => {
     if (!cameraStatus || cameraConnectAttempted.current) return;
     cameraConnectAttempted.current = true;
-    if (!cameraStatus.connected || cameraStatus.source?.toLowerCase() !== "hikvision") {
-      connectCamera("hikvision");
+    if (!cameraStatus.connected && !cameraStatus.running) {
+      connectCamera(cameraStatus.source || "hikvision");
     }
   }, [cameraStatus, connectCamera]);
 

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import RLock
@@ -11,6 +13,8 @@ from backend.app.core import config
 from backend.app.services.camera_stream import CameraManager
 from backend.app.services.pcb_engine import PCBPipeline
 from backend.app.services.reference_catalog import ReferenceCatalog
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -31,6 +35,14 @@ async def lifespan(application: FastAPI):
         legacy_detected_path=config.REFERENCE_DETECTED_PATH,
     )
     application.state.camera = CameraManager(config.CAMERA_SOURCE)
+    connected, message = await asyncio.to_thread(
+        application.state.camera.connect,
+        config.CAMERA_SOURCE,
+    )
+    if connected:
+        logger.info("Camera tự kết nối khi backend khởi động: %s", message)
+    else:
+        logger.warning("Không thể tự kết nối camera khi backend khởi động: %s", message)
     yield
     application.state.camera.disconnect()
 

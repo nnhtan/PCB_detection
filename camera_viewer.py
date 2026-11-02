@@ -2,7 +2,7 @@
 """
 Chương trình hiển thị và điều khiển Camera Công nghiệp Hikvision (Hikrobot)
 - Tự động nhận diện camera GigE / USB (Model: MV-CE120-10GM...)
-- Điều chỉnh thời gian lấy sáng (Exposure Time) linh hoạt, mặc định 300,000 µs (300 ms)
+- Điều chỉnh thời gian lấy sáng (Exposure Time) linh hoạt, mặc định 20,000 µs (20 ms)
 - Hỗ trợ thanh kéo (Trackbar) và phím tắt (+ / - / [ / ])
 - Chụp ảnh full độ phân giải 12MP (4024x3036) lưu vào thư mục captures/
 """
@@ -56,7 +56,7 @@ except ImportError as e:
 
 
 class HikCameraViewer:
-    def __init__(self, default_exposure_us=300000.0):
+    def __init__(self, default_exposure_us=20000.0):
         self.default_exposure_us = float(default_exposure_us)
         self.current_exposure_us = float(default_exposure_us)
         self.exp_min = 34.0
@@ -99,9 +99,161 @@ class HikCameraViewer:
         self.toast_msg = msg
         self.toast_time = time.time() + duration
 
-    def connect(self):
-        """Khởi tạo SDK và kết nối tới camera đầu tiên tìm thấy"""
-        print("[1/4] Đang khởi tạo Hikvision SDK...")
+    @staticmethod
+    def _decode_field(value) -> str:
+        if isinstance(value, (bytes, bytearray)):
+            return value.split(b"\x00", 1)[0].decode("ascii", errors="ignore").strip()
+        return str(value).strip()
+
+    @staticmethod
+    def _ip_from_uint(value: int) -> str:
+        if value <= 0:
+            return ""
+        return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+    @staticmethod
+    def _ip_to_uint(ip_str: str) -> int:
+        try:
+            parts = [int(p) for p in ip_str.strip().split(".")]
+            if len(parts) == 4 and all(0 <= p <= 255 for p in parts):
+                return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+        except Exception:
+            pass
+        return 0
+
+    @staticmethod
+    def _is_ip_address(text: str) -> bool:
+        parts = text.strip().split(".")
+        return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+    def _find_device_index(self, device_list: MV_CC_DEVICE_INFO_LIST, source: str) -> int | None:
+        target = str(source).strip().lower()
+        if not target or target in {"hikvision", "hikrobot", "hik", "auto", "default"}:
+            return 0
+
+        for index in range(device_list.nDeviceNum):
+            device_info = cast(device_list.pDeviceInfo[index], POINTER(MV_CC_DEVICE_INFO)).contents
+            if device_info.nTLayerType == MV_GIGE_DEVICE:
+                gig_e = device_info.SpecialInfo.stGigEInfo
+                ip_str = self._ip_from_uint(int(gig_e.nCurrentIp)).lower()
+                candidates = [
+                    self._decode_field(gig_e.chModelName).lower(),
+                    self._decode_field(gig_e.chUserDefinedName).lower(),
+                    self._decode_field(gig_e.chManufacturerName).lower(),
+                    ip_str,
+                ]
+                if target == ip_str or target in candidates or any(target in candidate for candidate in candidates if candidate):
+                    return index
+            elif device_info.nTLayerType == MV_USB_DEVICE:
+                usb = device_info.SpecialInfo.stUsb3VInfo
+                candidates = [
+                    self._decode_field(usb.chModelName).lower(),
+                    self._decode_field(usb.chUserDefinedName).lower(),
+                    self._decode_field(usb.chSerialNumber).lower(),
+                ]
+                if target in candidates or any(target in candidate for candidate in candidates if candidate):
+                    return index
+        return None
+
+    @classmethod
+    def _resolve_gige_network(cls, requested_source: str) -> tuple[str, str]:
+        """Tự động phân giải IP Camera và IP Card mạng máy tính (nNetExport)."""
+        cam_ip = requested_source.strip()
+        net_export_ip = ""
+        try:
+            import subprocess, re
+
+            def get_arp():
+                arp_out = subprocess.check_output("arp -a", text=True, stderr=subprocess.DEVNULL)
+                current_iface = None
+                iface_map = {}
+                for line in arp_out.splitlines():
+                    line = line.strip()
+                    if line.startswith("Interface:"):
+                        m = re.search(r"Interface:\s*([\d\.]+)", line)
+                        if m:
+                            current_iface = m.group(1)
+                            iface_map[current_iface] = []
+                    elif current_iface and line:
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[2].lower() == "dynamic":
+                            peer_ip = parts[0]
+                            mac = parts[1].lower().replace("-", ":")
+                            iface_map[current_iface].append((peer_ip, mac))
+                return iface_map
+
+            iface_map = get_arp()
+
+            # Nếu bảng ARP chưa có peer động trên dải 169.254.x, ping broadcast và IP camera mặc định để làm mới ARP
+            needs_ping = False
+            if cam_ip in iface_map and not iface_map[cam_ip]:
+                needs_ping = True
+            elif not any(iface.startswith("169.254.") and peers for iface, peers in iface_map.items()):
+                needs_ping = True
+
+            if needs_ping:
+                try:
+                    subprocess.run("ping -n 1 -w 400 169.254.255.255", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run("ping -n 1 -w 400 169.254.128.100", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    iface_map = get_arp()
+                except Exception:
+                    pass
+
+            # TH1: IP nhập vào là IP của chính card mạng PC (ví dụ 169.254.128.194)
+            if cam_ip in iface_map:
+                net_export_ip = cam_ip
+                peers = iface_map[cam_ip]
+                hik_peers = [p[0] for p in peers if p[1].startswith("c4:2f:90")]
+                if hik_peers:
+                    cam_ip = hik_peers[0]
+                elif peers:
+                    cam_ip = peers[0][0]
+                elif cam_ip.startswith("169.254."):
+                    cam_ip = "169.254.128.100"
+            # TH2: Nguồn là "hikvision", "hikrobot" hoặc rỗng -> tự dò
+            elif cam_ip.lower() in {"hikvision", "hikrobot", "hik", "auto", "default", ""}:
+                for iface, peers in iface_map.items():
+                    for p_ip, p_mac in peers:
+                        if p_mac.startswith("c4:2f:90") or p_ip.startswith("169.254."):
+                            cam_ip = p_ip
+                            net_export_ip = iface
+                            break
+                    if net_export_ip:
+                        break
+            # TH3: IP là của camera -> tìm iface tương ứng
+            else:
+                for iface, peers in iface_map.items():
+                    for p_ip, _ in peers:
+                        if p_ip == cam_ip:
+                            net_export_ip = iface
+                            break
+                    if net_export_ip:
+                        break
+                if not net_export_ip and cam_ip.startswith("169.254."):
+                    for iface in iface_map:
+                        if iface.startswith("169.254."):
+                            net_export_ip = iface
+                            break
+        except Exception:
+            pass
+
+        if cam_ip and not net_export_ip:
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect((cam_ip, 80))
+                net_export_ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                pass
+
+        return cam_ip, net_export_ip
+
+    def connect(self, source=None):
+        """Khởi tạo SDK và kết nối tới camera Hikvision, có thể theo IP chỉ định hoặc camera đầu tiên tìm thấy."""
+        default_source = os.environ.get("PCB_CAMERA_SOURCE", "169.254.128.194")
+        requested_source = str(source).strip() if source is not None else default_source
+        print(f"[1/4] Đang khởi tạo Hikvision SDK (nguồn: {requested_source})...")
         ret = MvCamera.MV_CC_Initialize()
         if ret != 0:
             print(f"[LỖI] MV_CC_Initialize thất bại: 0x{ret:x}")
@@ -110,20 +262,54 @@ class HikCameraViewer:
         device_list = MV_CC_DEVICE_INFO_LIST()
         tlayer_type = MV_GIGE_DEVICE | MV_USB_DEVICE
         ret = MvCamera.MV_CC_EnumDevices(tlayer_type, device_list)
-        if ret != 0 or device_list.nDeviceNum == 0:
-            print("[LỖI] Không tìm thấy camera Hikvision nào được kết nối!")
-            return False
 
-        print(f"[2/4] Tìm thấy {device_list.nDeviceNum} thiết bị. Đang kết nối camera đầu tiên...")
-        st_device = cast(device_list.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
+        st_device = None
+        is_direct_ip = False
+        device_index = 0
 
-        # Lấy tên Model thiết bị
-        if st_device.nTLayerType == MV_GIGE_DEVICE:
-            model_bytes = bytes(st_device.SpecialInfo.stGigEInfo.chModelName).split(b'\x00')[0]
-            self.device_name = model_bytes.decode('ascii', errors='ignore').strip()
-        elif st_device.nTLayerType == MV_USB_DEVICE:
-            model_bytes = bytes(st_device.SpecialInfo.stUsb3VInfo.chModelName).split(b'\x00')[0]
-            self.device_name = model_bytes.decode('ascii', errors='ignore').strip()
+        if ret == 0 and device_list.nDeviceNum > 0:
+            if requested_source.lower() not in {"hikvision", "hikrobot", "hik", "auto", "default", ""}:
+                matched_index = self._find_device_index(device_list, requested_source)
+                if matched_index is not None:
+                    device_index = matched_index
+                    st_device = cast(device_list.pDeviceInfo[device_index], POINTER(MV_CC_DEVICE_INFO)).contents
+            else:
+                st_device = cast(device_list.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
+
+        # Nếu không tìm thấy qua EnumDevices, thử phân giải IP và kết nối trực tiếp GigE
+        if st_device is None:
+            resolved_cam_ip, resolved_net_ip = self._resolve_gige_network(requested_source)
+            if self._is_ip_address(resolved_cam_ip):
+                print(f"[THÔNG BÁO] Kết nối trực tiếp camera GigE: Camera IP = {resolved_cam_ip}, Card mạng PC = {resolved_net_ip or 'Auto'}...")
+                direct_dev_info = MV_CC_DEVICE_INFO()
+                direct_gig_e = MV_GIGE_DEVICE_INFO()
+                direct_gig_e.nCurrentIp = self._ip_to_uint(resolved_cam_ip)
+                if resolved_net_ip:
+                    direct_gig_e.nNetExport = self._ip_to_uint(resolved_net_ip)
+                direct_dev_info.nTLayerType = MV_GIGE_DEVICE
+                direct_dev_info.SpecialInfo.stGigEInfo = direct_gig_e
+                st_device = direct_dev_info
+                is_direct_ip = True
+                self.device_name = f"GigE Camera ({resolved_cam_ip})"
+            else:
+                print(f"[LỖI] Không tìm thấy camera Hikvision khớp với nguồn: {requested_source}. Kiểm tra IP camera hoặc cáp mạng LAN.")
+                return False
+
+        if not is_direct_ip:
+            print(f"[2/4] Tìm thấy {device_list.nDeviceNum} thiết bị. Đang kết nối camera #{device_index + 1}...")
+            # Lấy tên Model thiết bị
+            if st_device.nTLayerType == MV_GIGE_DEVICE:
+                gig_e = st_device.SpecialInfo.stGigEInfo
+                model_bytes = bytes(gig_e.chModelName).split(b'\x00')[0]
+                self.device_name = model_bytes.decode('ascii', errors='ignore').strip() or self.device_name
+                current_ip = self._ip_from_uint(int(gig_e.nCurrentIp))
+                if current_ip:
+                    print(f"      -> IP camera: {current_ip}")
+            elif st_device.nTLayerType == MV_USB_DEVICE:
+                model_bytes = bytes(st_device.SpecialInfo.stUsb3VInfo.chModelName).split(b'\x00')[0]
+                self.device_name = model_bytes.decode('ascii', errors='ignore').strip() or self.device_name
+        else:
+            print(f"[2/4] Đang mở kết nối camera GigE IP: {requested_source}...")
 
         print(f"      -> Model: {self.device_name}")
 
@@ -135,7 +321,7 @@ class HikCameraViewer:
 
         ret = self.cam.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
         if ret != 0:
-            print(f"[LỖI] MV_CC_OpenDevice thất bại: 0x{ret:x}")
+            print(f"[LỖI] MV_CC_OpenDevice thất bại: 0x{ret:x} (Kiểm tra xem camera có đang bị chiếm dụng bởi MVS hay tiến trình khác không)")
             return False
 
         # Tối ưu kích thước gói cho GigE
@@ -151,7 +337,7 @@ class HikCameraViewer:
             self.exp_max = exp_val.fMax
             print(f"      -> Giới hạn Exposure: {self.exp_min:.0f} µs ~ {self.exp_max:.0f} µs")
 
-        # Cài đặt phơi sáng thủ công và gán giá trị mặc định 300,000 µs
+        # Cài đặt phơi sáng thủ công và áp dụng giá trị mặc định
         print(f"[3/4] Cài đặt thời gian lấy sáng mặc định: {self.default_exposure_us:.0f} µs...")
         self.cam.MV_CC_SetEnumValue("ExposureAuto", 0)  # 0: Off
         self.set_exposure(self.default_exposure_us)
@@ -320,9 +506,9 @@ class HikCameraViewer:
         self.is_grabbing = False
         print("[HOÀN TẤT] Camera đã đóng an toàn.")
 
-    def run_gui(self):
+    def run_gui(self, source=None):
         """Vòng lặp hiển thị giao diện OpenCV với thanh trượt và phím tắt"""
-        if not self.connect():
+        if not self.connect(source=source):
             return
         if not self.start_stream():
             self.stop()
@@ -351,7 +537,7 @@ class HikCameraViewer:
         print(" - Phím [-] hoặc [_] : Giảm -10 ms (-10,000 µs)")
         print(" - Phím [ ] ]        : Tăng +50 ms (+50,000 µs)")
         print(" - Phím [ [ ]        : Giảm -50 ms (-50,000 µs)")
-        print(" - Phím [R]          : Reset về mặc định 300,000 µs (300 ms)")
+        print(" - Phím [R]          : Reset về mặc định 20,000 µs (20 ms)")
         print(" - Phím [C]          : Bật / Tắt nhận diện & cắt bo mạch PCB tự động")
         print(" - Phím [S] / [SPACE]: Chụp ảnh full 12MP (kèm ảnh PCB nắn thẳng)")
         print(" - Phím [Q] / [ESC]  : Thoát chương trình")
@@ -508,5 +694,6 @@ class HikCameraViewer:
 
 
 if __name__ == "__main__":
-    viewer = HikCameraViewer(default_exposure_us=300000.0)
-    viewer.run_gui()
+    cam_ip = os.environ.get("PCB_CAMERA_SOURCE", "169.254.128.194")
+    viewer = HikCameraViewer(default_exposure_us=20000.0)
+    viewer.run_gui(source=cam_ip)

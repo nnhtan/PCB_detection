@@ -78,8 +78,8 @@
     },
     {
       "id": 10,
-      "class_id": 12,
-      "class": "inductor",
+      "class_id": 13,
+      "class": "potentiometer",
       "confidence_reference": 0.5891,
       "x": 1095.41,
       "y": 117.49

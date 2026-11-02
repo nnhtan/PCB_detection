@@ -75,6 +75,7 @@ async def camera_scan(
     imgsz: int = Form(DEFAULT_IMGSZ),
     tolerance_ratio: float = Form(DEFAULT_TOLERANCE_RATIO),
     auto_crop: str | None = Form(None),
+    fast_mode: str | None = Form("true"),
 ):
     camera = get_camera(request)
     frame, frame_id, fps = camera.get_frame()
@@ -92,6 +93,7 @@ async def camera_scan(
             "imgsz": imgsz,
             "tolerance_ratio": tolerance_ratio,
             "auto_crop": auto_crop if auto_crop is not None else True,
+            "fast_mode": fast_mode if fast_mode is not None else True,
         },
     )
     payload = inspection_payload(result)

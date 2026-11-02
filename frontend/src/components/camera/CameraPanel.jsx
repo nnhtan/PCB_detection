@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Camera, CheckCircle2, CircleStop, Crop, LoaderCircle, Pause, Play, RotateCcw, ScanLine, Video, Workflow, XCircle } from "lucide-react";
+import { Camera, CheckCircle2, CircleStop, Crop, LoaderCircle, Pause, Play, RotateCcw, ScanLine, Video, Workflow, XCircle, Zap } from "lucide-react";
 import PageHeader from "../common/PageHeader.jsx";
 import InspectionResults from "../inspector/InspectionResults.jsx";
 import { useCamera } from "../../hooks/useCamera.js";
@@ -7,26 +7,27 @@ import { api } from "../../services/api.js";
 
 export default function CameraPanel() {
   const { status, error: cameraError, busy: cameraBusy, connect, disconnect } = useCamera();
-  const [source, setSource] = useState("hikvision");
+  const [source, setSource] = useState("169.254.128.194");
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
-  const [exposureUs, setExposureUs] = useState(300000);
+  const [exposureUs, setExposureUs] = useState(20000);
   const [exposureBusy, setExposureBusy] = useState(false);
   const [exposureError, setExposureError] = useState("");
   const [result, setResult] = useState(null);
   const [autoCrop, setAutoCrop] = useState(true);
+  const [fastMode, setFastMode] = useState(true);
   const [autoScan, setAutoScan] = useState(false);
   const [autoScanPaused, setAutoScanPaused] = useState(false);
-  const [scanInterval, setScanInterval] = useState(3);
+  const [scanInterval, setScanInterval] = useState(0.5);
   const [autoScanCounts, setAutoScanCounts] = useState({ ok: 0, faulty: 0 });
   const scanInProgress = useRef(false);
   const countSession = useRef(0);
 
   useEffect(() => {
-    if (status?.source === "hikrobot" && status.exposure_us != null) {
+    if (status?.exposure_us != null) {
       setExposureUs(status.exposure_us);
     }
-  }, [status?.source, status?.connected]);
+  }, [status?.source, status?.connected, status?.exposure_us]);
 
   const scan = useCallback(async (countAutomaticResult = false) => {
     if (scanInProgress.current) return;
@@ -37,6 +38,7 @@ export default function CameraPanel() {
     try {
       const form = new FormData();
       form.append("auto_crop", String(autoCrop));
+      form.append("fast_mode", String(fastMode));
       const response = await api.postForm("/api/camera/scan", form);
       setResult(response);
       if (countAutomaticResult && scanCountSession === countSession.current) {
@@ -56,12 +58,27 @@ export default function CameraPanel() {
       scanInProgress.current = false;
       setScanBusy(false);
     }
-  }, [autoCrop]);
+  }, [autoCrop, fastMode]);
 
   useEffect(() => {
     if (!autoScan || autoScanPaused || !status?.connected) return undefined;
-    const timer = window.setInterval(() => scan(true), scanInterval * 1000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer;
+    const scanOnSchedule = async () => {
+      const startedAt = performance.now();
+      await scan(true);
+      if (!cancelled) {
+        const remaining = scanInterval === 0
+          ? 0
+          : scanInterval * 1000 - (performance.now() - startedAt);
+        timer = window.setTimeout(scanOnSchedule, Math.max(0, remaining));
+      }
+    };
+    scanOnSchedule();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [autoScan, autoScanPaused, scan, scanInterval, status?.connected]);
 
   const toggleAutoScan = () => {
@@ -101,10 +118,10 @@ export default function CameraPanel() {
 
   return (
     <>
-      <PageHeader eyebrow="LIVE INSPECTION" title="Camera trực tiếp" description="Kết nối camera Hikvision, webcam hoặc camera IP để xem stream và quét PCB ngay tại chỗ." />
+      <PageHeader eyebrow="LIVE INSPECTION" title="Camera trực tiếp" description="Quét khung hình để xử lý PCB và hiển thị kết quả đối chiếu với mạch tham chiếu đang dùng." />
       <div className="panel-card camera-panel">
         <div className="camera-toolbar">
-          <label className="camera-source"><span>Nguồn camera</span><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="hikvision, 0 hoặc URL camera IP" /></label>
+          <label className="camera-source"><span>Nguồn camera</span><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="169.254.128.194, hikvision hoặc 0" /></label>
           <div className="camera-actions">
             {status?.connected ? <button className="button button-danger" disabled={cameraBusy} onClick={stopCamera}><CircleStop size={16} /> Ngắt kết nối</button> : <button className="button button-primary" disabled={cameraBusy || !source.trim()} onClick={() => connect(source)}>{cameraBusy ? <LoaderCircle className="spin" size={16} /> : <Video size={16} />} Kết nối camera</button>}
             <button className="button button-light" disabled={!status?.connected || scanBusy} onClick={scan}>{scanBusy ? <LoaderCircle className="spin" size={16} /> : <ScanLine size={16} />} Quét khung hình</button>
@@ -119,9 +136,24 @@ export default function CameraPanel() {
               <span className="crop-indicator" />
               <strong>{autoCrop ? "BẬT" : "TẮT"}</strong>
             </button>
+            <button
+              type="button"
+              className={`toggle-crop-button ${fastMode ? "" : "active"}`}
+              onClick={() => setFastMode((enabled) => !enabled)}
+              title={fastMode ? "Quét nhanh: SAHI lát 960 px" : "Quét chi tiết: SAHI lát 320 px, ưu tiên linh kiện nhỏ"}
+            >
+              <Zap size={15} />
+              <span>{fastMode ? "Quét nhanh" : "Quét chi tiết"}</span>
+              <span className="crop-indicator" />
+              <strong>BẬT</strong>
+            </button>
             <div className="auto-scan-controls">
               <label className="auto-scan-interval" htmlFor="camera-scan-interval">Mỗi</label>
               <select id="camera-scan-interval" value={scanInterval} onChange={(event) => setScanInterval(Number(event.target.value))} aria-label="Chu kỳ quét tự động">
+                <option value={0}>Nhanh nhất</option>
+                <option value={0.5}>0,5 giây</option>
+                <option value={1}>1 giây</option>
+                <option value={2}>2 giây</option>
                 <option value={3}>3 giây</option>
                 <option value={5}>5 giây</option>
                 <option value={10}>10 giây</option>
@@ -132,7 +164,7 @@ export default function CameraPanel() {
             </div>
           </div>
         </div>
-        {(status?.source === "hikrobot" || status?.source === "hikvision") && status.connected && status.exposure_min_us != null && (
+        {status?.connected && status.exposure_min_us != null && (
           <div className="camera-exposure">
             <label className="camera-exposure-label" htmlFor="camera-exposure">
               <span>Thời gian lấy sáng</span>
@@ -162,7 +194,7 @@ export default function CameraPanel() {
             <img src={api.cameraStream} alt="Luồng camera trực tiếp" />
             <div className="camera-live-pill"><span className={`status-dot ${status?.connected ? "online" : ""}`} />{status?.connected ? "LIVE" : "CHỜ CAMERA"}</div>
             {status?.connected && <div className="camera-fps">{status.fps || 0} FPS · FRAME #{status.frame_id}</div>}
-            {!status?.connected && <div className="camera-overlay"><div className="camera-placeholder"><Camera size={30} /><strong>Chưa kết nối camera</strong><span>Nhập “hikvision”, chỉ số webcam (0) hoặc URL camera IP phía trên</span></div></div>}
+            {!status?.connected && <div className="camera-overlay"><div className="camera-placeholder"><Camera size={30} /><strong>Chưa kết nối camera</strong><span>Nhập IP camera (169.254.128.194), hikvision hoặc 0 phía trên</span></div></div>}
           </section>
           <section className="camera-result-panel">
             <div className="section-title"><div><h2><ScanLine size={18} /> Kết quả & đánh giá</h2><p>{autoScanPaused ? "Đã tạm dừng quét tự động" : autoScan ? `Đang tự động quét mỗi ${scanInterval} giây` : result ? `Khung hình #${result.frame_id || status?.frame_id || "—"}` : "Quét khung hình để xem đánh giá PCB"}</p></div></div>
@@ -188,7 +220,7 @@ export default function CameraPanel() {
                 <span>Mạch lỗi</span>
                 <strong>{autoScanCounts.faulty}</strong>
               </div>
-              <p>Bộ đếm tính theo từng lượt quét tự động có kết quả OK/FAULTY; UNALIGNED không tính.</p>
+              <p>Bộ đếm chỉ tính kết quả OK/FAULTY; nếu chưa căn chỉnh được thì hệ thống vẫn đối chiếu số lượng nhưng chưa kết luận vị trí.</p>
             </div>
             {result ? <InspectionResults result={result} /> : (
               <div className="camera-result-empty">

@@ -53,12 +53,40 @@ def inspection_payload(result: dict[str, Any], filename: str | None = None) -> d
         "is_ok": result["status"] == "OK",
         "aligned": result["aligned"],
         "qa_available": result["qa_available"],
+        "comparison_scope": result["comparison_scope"],
+        "comparison_note": result["comparison_note"],
         "alignment_method": result["alignment_method"],
+        "alignment_error": result["alignment_error"],
+        "alignment_transform": result["alignment_transform"],
+        "orientation_transform": result["orientation_transform"],
+        "alignment": {
+            "aligned": result["aligned"],
+            "qa_available": result["qa_available"],
+            "method": result["alignment_method"],
+            "error": result["alignment_error"],
+            "transform": result["alignment_transform"],
+            "orientation_transform": result["orientation_transform"],
+        },
         "crop_method": result["crop_method"],
         "stats": result["stats"],
+        "inventory_comparison": result["inventory_comparison"],
         "class_counts": result["class_counts"],
         "detections": result["detections"],
+        "matched_components": result["matched_components"],
+        "class_mismatch_details": result["class_mismatch_details"],
         "missing_components_details": result["missing_components_details"],
+        "extra_components_details": result["extra_components_details"],
+        "matching": {
+            "matched": result["matched_components"],
+            "class_mismatch": result["class_mismatch_details"],
+            "missing": result["missing_components_details"],
+            "extra": result["extra_components_details"],
+            "stats": {
+                "matched": result["stats"]["matched"],
+                "missing": result["stats"]["missing"],
+                "extra": result["stats"]["extra"],
+            },
+        },
         "latency_ms": result["latency_ms"],
         "annotated_image": image_to_data_uri(result["annotated_image"]),
         "board_crop_image": image_to_data_uri(result["board_crop_image"]),
@@ -75,6 +103,7 @@ def run_inspection(pipeline: Any, frame: np.ndarray, values: Any) -> dict[str, A
         DEFAULT_EXTRA_ALLOWED,
         DEFAULT_IMGSZ,
         DEFAULT_MISSING_ALLOWED,
+        MAX_TOLERANCE_RATIO,
         DEFAULT_TOLERANCE_RATIO,
     )
 
@@ -83,18 +112,28 @@ def run_inspection(pipeline: Any, frame: np.ndarray, values: Any) -> dict[str, A
             status_code=409,
             detail="Chưa có mạch tham chiếu. Hãy tải ảnh mạch chuẩn trước khi kiểm tra.",
         )
+    tolerance_ratio = float(
+        values.get("tolerance_ratio", DEFAULT_TOLERANCE_RATIO)
+    )
+    if not 0.0 < tolerance_ratio <= MAX_TOLERANCE_RATIO:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Dung sai vị trí phải lớn hơn 0 và không vượt quá "
+                f"{MAX_TOLERANCE_RATIO:.0%} kích thước bo mạch."
+            ),
+        )
     try:
         with pipeline.operation_lock:
             return pipeline.inspect_pcb(
                 frame=frame,
                 conf=float(values.get("conf", DEFAULT_CONF)),
                 imgsz=int(values.get("imgsz", DEFAULT_IMGSZ)),
-                tolerance_ratio=float(
-                    values.get("tolerance_ratio", DEFAULT_TOLERANCE_RATIO)
-                ),
+                tolerance_ratio=tolerance_ratio,
                 extra_allowed=int(values.get("extra_allowed", DEFAULT_EXTRA_ALLOWED)),
                 missing_allowed=int(values.get("missing_allowed", DEFAULT_MISSING_ALLOWED)),
                 auto_crop=parse_bool(values.get("auto_crop", True)),
+                fast_mode=parse_bool(values.get("fast_mode", False)),
             )
     except BoardCropError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

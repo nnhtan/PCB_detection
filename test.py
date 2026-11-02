@@ -37,9 +37,10 @@ REFERENCE_IMAGE = str(
     else (PROJECT_DIR / "Image_20261019190958053.bmp")
 )
 
-# Camera điện thoại Android IP Webcam (hoặc SOURCE = 0 cho webcam máy tính)
+# Camera IP (Hikvision GigE 169.254.128.194, IP Webcam hoặc SOURCE = 0 cho webcam)
+DEFAULT_CAMERA_IP = "169.254.128.194"
 SOURCE_VALUE = os.environ.get(
-    "PCB_CAMERA_SOURCE", "http://192.168.0.190:8080/video"
+    "PCB_CAMERA_SOURCE", DEFAULT_CAMERA_IP
 )
 try:
     SOURCE = int(SOURCE_VALUE)
@@ -211,9 +212,25 @@ class CameraStream:
             self.thread.start()
 
     def _open(self):
-        cap = cv2.VideoCapture(self.source)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap
+        sources = [self.source]
+        if isinstance(self.source, str):
+            raw = self.source.strip()
+            parts = raw.split(".")
+            if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                sources = [
+                    f"http://{raw}:8080/video",
+                    f"rtsp://{raw}:554/stream1",
+                    f"http://{raw}:4747/video",
+                    f"http://{raw}",
+                    raw,
+                ]
+        for src in sources:
+            cap = cv2.VideoCapture(src)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        return cv2.VideoCapture(self.source)
 
     def is_opened(self):
         return self.cap.isOpened()
@@ -281,8 +298,9 @@ class HikCameraStream:
     """Camera Hikvision đọc ở luồng riêng, cùng giao diện với CameraStream:
     read(), wait_for_frame(), is_opened(), stop(). Thêm set_exposure()."""
 
-    def __init__(self, exposure_us=HIK_EXPOSURE_US):
+    def __init__(self, exposure_us=HIK_EXPOSURE_US, target=None):
         self.exposure_us = float(exposure_us)
+        self.target = target if target is not None else SOURCE_VALUE
         self.exp_min, self.exp_max = 34.0, 1999733.0
         self.device_name = "Hikvision Camera"
         self.sdk = self.pixel = None
@@ -318,17 +336,53 @@ class HikCameraStream:
 
         devices = sdk.MV_CC_DEVICE_INFO_LIST()
         ret = sdk.MvCamera.MV_CC_EnumDevices(sdk.MV_GIGE_DEVICE | sdk.MV_USB_DEVICE, devices)
-        if ret != 0 or devices.nDeviceNum == 0:
-            print("[WARN] Không tìm thấy camera Hikvision nào được kết nối.", flush=True)
+
+        info = None
+        if ret == 0 and devices.nDeviceNum > 0:
+            target_str = str(self.target).strip().lower()
+            if target_str not in {"auto", "hikvision", "hik", ""}:
+                for idx in range(devices.nDeviceNum):
+                    d_info = cast(devices.pDeviceInfo[idx], POINTER(sdk.MV_CC_DEVICE_INFO)).contents
+                    if d_info.nTLayerType == sdk.MV_GIGE_DEVICE:
+                        ip_val = int(d_info.SpecialInfo.stGigEInfo.nCurrentIp)
+                        ip_str = ".".join(str((ip_val >> s) & 0xFF) for s in (24, 16, 8, 0))
+                        if target_str == ip_str.lower():
+                            info = d_info
+                            break
+            if info is None:
+                info = cast(devices.pDeviceInfo[0], POINTER(sdk.MV_CC_DEVICE_INFO)).contents
+
+        # Nếu enum không thấy mà target là IP hoặc tên, thử phân giải IP và kết nối trực tiếp
+        if info is None and self.target:
+            from camera_viewer import HikCameraViewer
+            cam_ip, net_export_ip = HikCameraViewer._resolve_gige_network(str(self.target))
+            parts = cam_ip.strip().split(".")
+            if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                print(f"[INFO] Kết nối trực tiếp camera GigE: Camera={cam_ip}, PC NIC={net_export_ip or 'Auto'}...", flush=True)
+                direct_dev_info = sdk.MV_CC_DEVICE_INFO()
+                direct_gig_e = sdk.MV_GIGE_DEVICE_INFO()
+                direct_gig_e.nCurrentIp = (int(parts[0]) << 24) | (int(parts[1]) << 16) | (int(parts[2]) << 8) | int(parts[3])
+                if net_export_ip:
+                    n_parts = net_export_ip.strip().split(".")
+                    if len(n_parts) == 4 and all(p.isdigit() for p in n_parts):
+                        direct_gig_e.nNetExport = (int(n_parts[0]) << 24) | (int(n_parts[1]) << 16) | (int(n_parts[2]) << 8) | int(n_parts[3])
+                direct_dev_info.nTLayerType = sdk.MV_GIGE_DEVICE
+                direct_dev_info.SpecialInfo.stGigEInfo = direct_gig_e
+                info = direct_dev_info
+                self.device_name = f"GigE Camera ({cam_ip})"
+
+        if info is None:
+            print(f"[WARN] Không tìm thấy camera Hikvision nào (nguồn: {self.target}).", flush=True)
             return False
 
-        info = cast(devices.pDeviceInfo[0], POINTER(sdk.MV_CC_DEVICE_INFO)).contents
-        if info.nTLayerType == sdk.MV_GIGE_DEVICE:
+        if info.nTLayerType == sdk.MV_GIGE_DEVICE and self.device_name == "Hikvision Camera":
             raw_name = info.SpecialInfo.stGigEInfo.chModelName
-        else:
+            self.device_name = (bytes(raw_name).split(b"\x00")[0]
+                                .decode("ascii", errors="ignore").strip() or self.device_name)
+        elif info.nTLayerType == sdk.MV_USB_DEVICE:
             raw_name = info.SpecialInfo.stUsb3VInfo.chModelName
-        self.device_name = (bytes(raw_name).split(b"\x00")[0]
-                            .decode("ascii", errors="ignore").strip() or self.device_name)
+            self.device_name = (bytes(raw_name).split(b"\x00")[0]
+                                .decode("ascii", errors="ignore").strip() or self.device_name)
 
         self.cam = sdk.MvCamera()
         ret = self.cam.MV_CC_CreateHandle(info)
@@ -467,7 +521,7 @@ def open_camera():
 
     if backend in ("auto", "hikvision", "hik"):
         print("[INFO] Đang tìm camera Hikvision...", flush=True)
-        hik = HikCameraStream()
+        hik = HikCameraStream(target=SOURCE_VALUE)
         if hik.is_opened():
             print(f"[INFO] Đã mở camera Hikvision: {hik.device_name}", flush=True)
             return hik, f"Hikvision {hik.device_name}"

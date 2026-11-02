@@ -20,7 +20,7 @@
 - **Danh mục mạch tham chiếu:** lưu nhiều ảnh PCB chuẩn với tên riêng, chọn lại mạch cần dùng bất cứ lúc nào; lựa chọn hiện tại được giữ sau khi backend khởi động lại.
 - **Kiểm tra PCB:** tải ảnh PCB cần kiểm tra riêng, căn chỉnh với mạch chuẩn, so sánh vị trí và phân loại linh kiện thiếu/thừa.
 - **Nhận diện YOLO:** phát hiện và thống kê linh kiện trong ảnh độc lập, không yêu cầu reference.
-- **Camera trực tiếp:** kết nối webcam hoặc camera IP, xem MJPEG, quét từng frame hoặc đặt quét tự động mỗi 3, 5, hoặc 10 giây.
+- **Camera trực tiếp:** kết nối webcam hoặc camera IP, lưu frame làm mạch chuẩn mới, quét từng frame hoặc đặt quét tự động.
 - **Kết quả trực quan:** ảnh đánh dấu detections, số lượng linh kiện, kết quả đối chiếu và thời gian xử lý.
 - **API docs:** FastAPI Swagger UI tại `/docs`.
 
@@ -132,7 +132,7 @@ npm.cmd run dev
 
 ### Kết nối camera Hikvision trên giao diện web
 
-Backend phải chạy trên chính máy tính đã kết nối camera Hikvision. Cài Hikvision MVS để có SDK `MvCameraControl.dll`. Khi mở ứng dụng web, giao diện tự kết nối nguồn `hikvision`; không cần nhập nguồn hay nhấn nút kết nối. Khi quét, backend dùng `PCBMonoCropper` của `camera_viewer.py` để cắt/nắn PCB và xoay ảnh crop sang ngang trước khi phân tích. Giao diện chỉ hiển thị kết quả phân tích. Nếu thuật toán không tìm được bo mạch, pipeline cắt dự phòng hiện có vẫn được dùng. Thanh **Exposure time** trên trang Camera trực tiếp thay đổi thời gian phơi sáng theo ms trong giới hạn mà thiết bị báo về. Không chạy đồng thời chương trình xem camera desktop. Webcam máy tính vẫn dùng chỉ số như `0`, còn camera IP có thể dùng URL luồng như trước.
+Backend phải chạy trên chính máy tính đã kết nối camera Hikvision. Cài Hikvision MVS để có SDK `MvCameraControl.dll`. Backend tự kết nối nguồn `hikvision` khi khởi động; khi mở web, giao diện đọc trạng thái kết nối này và không mở kết nối trùng. Mặc định camera dùng IP `169.254.128.194` và thời gian phơi sáng `20 ms`; có thể đổi IP bằng biến môi trường `PCB_CAMERA_SOURCE` trước khi chạy backend. Nếu camera không được phát hiện, cần kiểm tra lại cáp LAN, địa chỉ IP của thiết bị, subnet và driver MVS. Khi quét, backend cắt/nắn PCB; nếu reference có hai tụ và một IC làm mốc, hệ thống dùng các mốc này để xoay crop đúng chiều rồi chạy YOLO lại trước khi đối chiếu. Phép xoay giữ toàn bộ vùng crop; nếu thiếu mốc hoặc không xác định được chiều, kết quả là `UNALIGNED` và không chạy QA. Giao diện chỉ hiển thị kết quả phân tích. Nếu thuật toán không tìm được bo mạch, yêu cầu bị từ chối thay vì phân tích toàn khung hình. Thanh **Exposure time** trên trang Camera trực tiếp thay đổi thời gian phơi sáng theo ms trong giới hạn mà thiết bị báo về. Không chạy đồng thời chương trình xem camera desktop. Webcam máy tính vẫn dùng chỉ số như `0`; camera Hikvision qua LAN nên dùng `hikvision` hoặc IP camera trực tiếp.
 
 ### Chạy giao diện đã build qua FastAPI
 
@@ -170,16 +170,22 @@ Mỗi mạch chuẩn được lưu riêng trong `backend\storage\references\<id>
 4. Chọn **Bắt đầu kiểm tra PCB**.
 5. Xem kết quả và danh sách detections. `OK`/`FAULTY` chỉ được đưa ra khi căn chỉnh thành công; `UNALIGNED` nghĩa là đã nhận diện nhưng chưa so sánh được vị trí với reference.
 
+Khi đã căn chỉnh và detection sai lớp nằm trong bán kính vị trí theo kích thước linh kiện tham chiếu, detection được ghép với reference dù hộp không chứa chính xác tâm reference; lớp reference được dùng làm nhãn chính và QA không tính đó là mismatch. Lớp YOLO cùng confidence gốc vẫn được giữ trong `yolo_class` và hiển thị trong bảng/nhãn ảnh để đối chiếu. Vì reference là nguồn quyết định lớp trong chế độ này, kết quả không xác nhận độc lập linh kiện lắp thực tế có đúng loại hay không; cần kiểm tra ảnh nếu YOLO bất đồng. Khi nhiều lớp dự đoán cùng một vùng, chúng được giữ lại cho đối chiếu; trong kiểm tra đã căn chỉnh, nếu một ứng viên khớp lớp reference tại đúng vị trí thì các ứng viên lớp khác chồng lấp tại cùng linh kiện bị loại kể cả khi hộp có kích thước chênh lệch lớn. Các detection khớp chính xác với reference của linh kiện lân cận luôn được giữ. Nhận diện YOLO độc lập vẫn giữ các lớp chồng lấp khác nhau để tránh xóa mất dự đoán thay thế.
+
 ### Nhận diện không đối chiếu
 
 Trong **Nhận diện YOLO**, tải một ảnh rồi chọn **Nhận diện linh kiện**. Trang này chỉ chạy detector, không cần mạch chuẩn.
+
+Pipeline kết hợp YOLO chạy trên toàn ảnh với dự đoán các lát SAHI để giữ khả năng bắt linh kiện nhỏ. Chỉ các hộp chồng lấp cùng lớp mới bị gộp theo độ tin cậy; lớp khác nhau được giữ lại vì có thể là ứng viên phân loại thay thế. Detector loại các dự đoán có tâm nằm bên trong hộp IC để giảm nhận nhầm chân IC thành linh kiện. Tạo reference cũng dùng cùng pipeline này để danh sách chuẩn và lượt kiểm tra nhất quán. Các biến thể viết hoa/thường của cùng tên lớp được chuẩn hóa; `inductor` và `potentiometer` vẫn là hai loại riêng biệt. Pipeline cũng bỏ lớp `buzzer`.
+
+Với linh kiện reference bị thiếu hoặc sai lớp, pipeline chạy thêm một lượt YOLO trên vùng tham chiếu đã phóng lớn, dùng ngưỡng `0.01` để không bỏ ứng viên lớp đúng có confidence thấp. Kết quả bổ sung chỉ được ghép khi đúng lớp reference và đúng vị trí trong dung sai; ứng viên không đạt điều kiện vẫn được báo thiếu hoặc cần kiểm tra.
 
 ### Camera trực tiếp
 
 1. Nhập `0` để dùng webcam mặc định trên máy chạy backend, hoặc nhập URL stream camera IP.
 2. Chọn **Kết nối camera**.
-3. Chọn **Quét khung hình** để quét thủ công. Kết quả xuất hiện bên cạnh stream.
-4. Chọn chu kỳ **3 giây**, **5 giây** hoặc **10 giây**, sau đó chọn **Tự động quét**. Chọn **Dừng tự động** để dừng; ngắt camera cũng sẽ dừng chế độ này.
+3. Chọn **Quét khung hình** để xử lý frame và hiển thị kết quả đối chiếu với reference đang dùng. Quét camera không tạo hoặc lưu mạch chuẩn.
+4. Chọn chu kỳ quét rồi chọn **Tự động quét**. Chọn **Dừng tự động** để dừng; ngắt camera cũng sẽ dừng chế độ này.
 
 Camera index như `0` trỏ tới máy đang chạy backend, không phải máy đang mở trình duyệt. Để dùng camera IP, cả backend và thiết bị camera phải truy cập được URL stream.
 
@@ -218,9 +224,9 @@ Các endpoint upload ảnh nhận `multipart/form-data`, trường file bắt bu
 - `/api/camera/scan`: `conf`, `imgsz`, `tolerance_ratio`.
 - `/api/camera/snapshot`: `source`, `conf`, `imgsz`, `tolerance_ratio`.
 
-Khi `auto_crop` được bật (mặc định), backend ưu tiên căn khung PCB theo ảnh mạch tham chiếu bằng ORB, sau đó mới thử tìm contour/màu. Nếu không tìm được bo mạch đầy đủ, yêu cầu bị từ chối thay vì chạy YOLO trên toàn ảnh; kết quả `/api/detect` trả thêm `crop_method` để xác nhận cách cắt đã dùng.
+Khi `auto_crop` được bật (mặc định), `/api/camera/scan` và `/api/inspect` trước tiên dùng ORB để tìm phép chiếu từ frame camera sang mạch tham chiếu; nếu thành công, OpenCV cắt/nắn PCB trực tiếp về đúng kích thước và chiều của ảnh reference. Chỉ khi không căn được theo reference, pipeline mới thử `PCBMonoCropper`, contour và ROI. Với các đường fallback, ảnh crop hiển thị cũng được nắn theo phép căn chỉnh cuối cùng; homography ORB hợp lệ được ưu tiên hơn affine để giảm nghiêng phối cảnh, đồng thời hộp detection và dấu linh kiện thiếu được vẽ trong cùng hệ tọa độ reference. Sau khi chuẩn hóa PCB, pipeline dùng SAHI overlap 20% để chia ảnh thành tile và phát hiện linh kiện; quét camera mặc định dùng chế độ nhanh tile 960 px để giảm độ trễ, có thể chuyển sang `fast_mode=false` để quét chi tiết với tile 320 px và ưu tiên linh kiện nhỏ; cả hai chế độ giữ `imgsz=1536`. Chế độ chi tiết bật test-time augmentation (TTA) cho lượt YOLO toàn ảnh và gom 2 tile/lượt trên GPU CUDA; chế độ nhanh tắt TTA và giữ batch 1. Benchmark trên ảnh mẫu cho thấy chế độ nhanh hoàn tất quét và ghép đủ 11/11 linh kiện trong khoảng 0,6 giây, nhanh hơn khoảng 3,2 lần so với chế độ chi tiết; kết quả còn tùy ảnh và phần cứng. Thử tăng batch lên 2/4 hoặc bật FP16 trên NVIDIA T600 không cải thiện thời gian ở ảnh mẫu, nên không bật các tùy chọn đó mặc định. Các hộp cùng lớp chồng ít nhất 50% diện tích hộp nhỏ hơn được gộp nếu chênh lệch diện tích không quá 4 lần. Hộp khác lớp không bị loại chỉ vì chồng lấp; khi căn chỉnh với reference, dự đoán cùng lớp tại đúng vị trí được ưu tiên, còn khi không có ứng viên cùng lớp thì dự đoán confidence cao nhất được giữ với trạng thái `REVIEW`. Phản hồi có `alignment_transform`, `orientation_transform` và `crop_method` để kiểm tra phép biến đổi và cách cắt đã dùng.
 
-Thông số kiểm tra mặc định trong pipeline: confidence `0.25`, ảnh YOLO `1536`, dung sai vị trí `0.045`, số linh kiện thiếu cho phép `0`, số linh kiện thừa cho phép `2`. Có thể xem thông số hiện hành tại `/api/info`.
+Thông số kiểm tra mặc định trong pipeline: confidence `0.35`, ảnh YOLO `1536`, dung sai vị trí `0.045` (4.5% cạnh lớn nhất của ảnh reference, tối đa 15%), số linh kiện thiếu cho phép `0`, số linh kiện thừa cho phép `2`. Việc ghép linh kiện luôn phải thỏa dung sai khoảng cách tâm; hộp detection bao trùm điểm reference không đủ để được tính là khớp. Có thể xem thông số hiện hành tại `/api/info`.
 
 Ví dụ PowerShell dùng `curl.exe` để nhận diện ảnh:
 
@@ -288,7 +294,7 @@ $env:PCB_CAMERA_SOURCE = "0"
 python test.py
 ```
 
-Để căn chỉnh camera và kiểm tra khung cắt trước khi nạp YOLO, chạy `python test.py --detect-only` (hoặc `python test1.py --detect-only`). Cửa sổ `PCB Crop` luôn hiển thị crop đầu vào; chế độ `--detect-only` bổ sung cửa sổ debug biên/mask nhưng không nạp YOLO. Nhấn `d` để lưu frame, mask, biên và thông số vào `debug\`. Sau khi crop đã đúng, chạy bình thường; chờ trạng thái PCB sẵn sàng rồi nhấn `s` để quét, `q` để thoát. Với camera Hikvision, thời gian phơi sáng mặc định là 30 ms; có thể đổi bằng PowerShell trước khi chạy, ví dụ `$env:PCB_HIK_EXPOSURE_US = "50000"` để dùng 50 ms. Tăng phơi sáng nếu ảnh quá tối; giảm nếu PCB di chuyển bị nhòe. Webcam/IP camera không bị ảnh hưởng bởi thiết lập này.
+Để căn chỉnh camera và kiểm tra khung cắt trước khi nạp YOLO, chạy `python test.py --detect-only` (hoặc `python test1.py --detect-only`). Cửa sổ `PCB Crop` luôn hiển thị crop đầu vào; chế độ `--detect-only` bổ sung cửa sổ debug biên/mask nhưng không nạp YOLO. Nhấn `d` để lưu frame, mask, biên và thông số vào `debug\`. Sau khi crop đã đúng, chạy bình thường; chờ trạng thái PCB sẵn sàng rồi nhấn `s` để quét, `q` để thoát. Với camera Hikvision, thời gian phơi sáng mặc định là 20 ms; có thể đổi bằng PowerShell trước khi chạy, ví dụ `$env:PCB_HIK_EXPOSURE_US = "50000"` để dùng 50 ms. Tăng phơi sáng nếu ảnh quá tối; giảm nếu PCB di chuyển bị nhòe. Webcam/IP camera không bị ảnh hưởng bởi thiết lập này.
 
 `machpcbgoc.py` tạo reference map bằng YOLO từ ảnh `2.jpg` và lưu dữ liệu/ảnh đã đánh dấu trong `backend\storage`:
 

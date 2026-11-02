@@ -1,8 +1,12 @@
+import logging
+import sys
 import threading
 import time
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class CameraManager:
@@ -26,17 +30,106 @@ class CameraManager:
         except (ValueError, TypeError):
             return str(source).strip()
 
+    @staticmethod
+    def _is_ip_address(text: str) -> bool:
+        parts = text.strip().split(".")
+        return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
     def _open_capture(self) -> cv2.VideoCapture:
-        capture = cv2.VideoCapture(self.source)
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not capture.isOpened():
-            capture.release()
-            raise RuntimeError(f"Không thể mở nguồn camera: {self.source}")
-        return capture
+        sources_to_try = [self.source]
+        if isinstance(self.source, str):
+            raw = self.source.strip()
+            if self._is_ip_address(raw):
+                sources_to_try = [
+                    f"http://{raw}:8080/video",
+                    f"rtsp://{raw}:554/stream1",
+                    f"rtsp://{raw}:554/h264Preview_01_main",
+                    f"http://{raw}:4747/video",
+                    f"http://{raw}",
+                    raw,
+                ]
+
+        last_error = None
+        for candidate in sources_to_try:
+            try:
+                capture = self._open_capture_candidate(candidate)
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if capture.isOpened():
+                    try:
+                        backend = capture.getBackendName()
+                    except cv2.error:
+                        backend = "unknown"
+                    hardware_decode = False
+                    if hasattr(cv2, "CAP_PROP_HW_ACCELERATION"):
+                        acceleration = capture.get(cv2.CAP_PROP_HW_ACCELERATION)
+                        hardware_decode = acceleration not in (
+                            getattr(cv2, "VIDEO_ACCELERATION_NONE", 0),
+                            -1,
+                        )
+                    logger.info(
+                        "Camera capture opened via %s (hardware decode: %s).",
+                        backend,
+                        hardware_decode,
+                    )
+                    return capture
+                capture.release()
+            except Exception as exc:
+                last_error = exc
+
+        raise RuntimeError(f"Không thể mở nguồn camera: {self.source} ({last_error or 'Không mở được luồng'})")
+
+    @staticmethod
+    def _open_capture_candidate(candidate: str | int) -> cv2.VideoCapture:
+        is_network_stream = isinstance(candidate, str) and candidate.lower().startswith(
+            ("http://", "https://", "rtsp://", "rtsps://")
+        )
+        if (
+            is_network_stream
+            and hasattr(cv2, "CAP_PROP_HW_ACCELERATION")
+            and hasattr(cv2, "VIDEO_ACCELERATION_ANY")
+        ):
+            try:
+                capture = cv2.VideoCapture(
+                    candidate,
+                    cv2.CAP_FFMPEG,
+                    [
+                        cv2.CAP_PROP_HW_ACCELERATION,
+                        cv2.VIDEO_ACCELERATION_ANY,
+                    ],
+                )
+                if capture.isOpened():
+                    return capture
+                capture.release()
+                logger.debug(
+                    "Hardware-accelerated decoding unavailable for %s; using the default backend.",
+                    candidate,
+                )
+            except (cv2.error, TypeError) as exc:
+                logger.debug(
+                    "Could not enable hardware decoding for %s; using the default backend: %s",
+                    candidate,
+                    exc,
+                )
+
+        if isinstance(candidate, int) and sys.platform == "win32":
+            try:
+                capture = cv2.VideoCapture(candidate, cv2.CAP_DSHOW)
+                if capture.isOpened():
+                    return capture
+                capture.release()
+            except (cv2.error, TypeError) as exc:
+                logger.debug(
+                    "DirectShow unavailable for camera %s; using the default backend: %s",
+                    candidate,
+                    exc,
+                )
+
+        return cv2.VideoCapture(candidate)
 
     def connect(self, source: str | int | None = None) -> tuple[bool, str]:
         if source is not None:
             self.source = self._parse_source(source)
+
         self.disconnect()
         with self.lock:
             self.last_error = ""
@@ -44,7 +137,7 @@ class CameraManager:
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
-        deadline = time.monotonic() + 2.5
+        deadline = time.monotonic() + 6.0
         while time.monotonic() < deadline:
             with self.lock:
                 if self.is_connected and self.frame is not None:
@@ -78,10 +171,32 @@ class CameraManager:
             self.is_connected = False
         return True, "Đã ngắt kết nối camera"
 
+    @staticmethod
+    def _is_hikvision_source(source: str | int | None) -> bool:
+        if source is None:
+            return False
+        text = str(source).strip().lower()
+        if not text:
+            return False
+        if text.startswith(("http://", "https://", "rtsp://", "rtsps://")):
+            return False
+        if text in {"hikvision", "hikrobot", "hik"}:
+            return True
+        return CameraManager._is_ip_address(text)
+
     def _worker(self) -> None:
-        if isinstance(self.source, str) and self.source.lower() == "hikvision":
-            self._hikvision_worker()
-            return
+        if self._is_hikvision_source(self.source):
+            hik_success = self._hikvision_worker()
+            if hik_success:
+                return
+            # Nếu là IP mà Hikvision SDK không mở được, tự động thử mở luồng IP stream qua OpenCV
+            if isinstance(self.source, str) and self._is_ip_address(self.source.strip()):
+                with self.lock:
+                    if not self.running:
+                        return
+                    self.last_error = f"Không tìm thấy camera Hikvision GigE tại {self.source}. Đang thử mở luồng IP camera qua OpenCV..."
+            else:
+                return
 
         try:
             cap = self._open_capture()
@@ -154,23 +269,23 @@ class CameraManager:
             self.cap = None
             self.is_connected = False
 
-    def _hikvision_worker(self) -> None:
+    def _hikvision_worker(self) -> bool:
         viewer = None
+        started = False
         try:
             from camera_viewer import HikCameraViewer
 
             viewer = HikCameraViewer()
-            if not viewer.connect():
+            if not viewer.connect(self.source):
                 with self.lock:
-                    self.last_error = "Không thể kết nối camera Hikvision. Kiểm tra camera và SDK MVS."
-                    self.running = False
-                return
+                    self.last_error = f"Không thể kết nối camera Hikvision với nguồn {self.source}."
+                return False
             if not viewer.start_stream():
                 with self.lock:
                     self.last_error = "Đã kết nối camera Hikvision nhưng không thể bắt đầu nhận hình."
-                    self.running = False
-                return
+                return False
 
+            started = True
             with self.lock:
                 self.hik_camera = viewer
                 self.is_connected = True
@@ -178,18 +293,22 @@ class CameraManager:
 
             last_time = time.monotonic()
             frame_count = 0
+            last_source_frame_count = -1
             while True:
                 with self.lock:
                     if not self.running:
                         break
                 with viewer.frame_lock:
-                    frame = (
-                        viewer.latest_frame.copy()
-                        if viewer.latest_frame is not None
-                        else None
-                    )
+                    source_frame_count = viewer.frame_count
+                    frame = None
+                    if (
+                        source_frame_count != last_source_frame_count
+                        and viewer.latest_frame is not None
+                    ):
+                        frame = viewer.latest_frame.copy()
+                        last_source_frame_count = source_frame_count
                 if frame is None:
-                    time.sleep(0.03)
+                    time.sleep(0.005)
                     continue
 
                 with self.lock:
@@ -202,11 +321,13 @@ class CameraManager:
                         self.fps = round(frame_count / (now - last_time), 1)
                     frame_count = 0
                     last_time = now
-                time.sleep(0.01)
+            return True
         except (ImportError, OSError, RuntimeError, cv2.error) as exc:
             with self.lock:
                 self.last_error = f"Lỗi camera Hikvision: {exc}"
-                self.running = False
+                if started:
+                    self.running = False
+            return started
         finally:
             if viewer is not None:
                 try:
@@ -248,7 +369,7 @@ class CameraManager:
                 "fps": self.fps,
                 "last_error": self.last_error,
             }
-            if self.source == "hikrobot" and self.hik_camera is not None:
+            if self.hik_camera is not None:
                 status.update({
                     "exposure_us": self.hik_camera.current_exposure_us,
                     "exposure_min_us": self.hik_camera.exp_min,
@@ -257,8 +378,15 @@ class CameraManager:
             return status
 
     def mjpeg_frames(self):
+        last_signature = None
         while True:
-            frame, _, _ = self.get_frame()
+            frame, frame_id, _ = self.get_frame()
+            is_placeholder = frame is None
+            signature = (frame_id, is_placeholder)
+            if signature == last_signature:
+                time.sleep(0.05)
+                continue
+            last_signature = signature
             if frame is None:
                 frame = np.zeros((480, 640, 3), dtype=np.uint8)
                 cv2.putText(
@@ -271,8 +399,15 @@ class CameraManager:
                     2,
                     cv2.LINE_AA,
                 )
+            elif frame.shape[1] > 1280:
+                scale = 1280 / frame.shape[1]
+                frame = cv2.resize(
+                    frame,
+                    (1280, round(frame.shape[0] * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
             ok, buffer = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75]
             )
             if ok:
                 yield (
@@ -280,4 +415,4 @@ class CameraManager:
                     + buffer.tobytes()
                     + b"\r\n"
                 )
-            time.sleep(0.03)
+            time.sleep(0.05)

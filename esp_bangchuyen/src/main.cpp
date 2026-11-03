@@ -24,13 +24,21 @@ const int PIN_SERVO_1 = 33; // Servo 1: CẤP PHÔI (GPIO 33)
 const int PIN_SERVO_2 = 32; // Servo 2: GẠT PHÔI (GPIO 32)
 
 // =============================================================================
-// 2. THÔNG SỐ XUNG PWM & HÀNH TRÌNH 70 XUNG (50Hz = 20ms/xung)
+// 2. THÔNG SỐ XUNG PWM & HÀNH TRÌNH TỪNG SERVO (50Hz = 20ms/xung)
 // =============================================================================
 const int SERVO_STOP_US = 1500; // Dừng hoàn toàn
-const int SERVO_FWD_US  = 1200; // Quay thuận (Xung mạnh mẽ, đủ lực kéo cơ cấu đẩy phôi)
-const int SERVO_REV_US  = 1800; // Quay nghịch (Xung mạnh mẽ, đủ lực kéo cơ cấu đẩy phôi)
+const int SERVO_FWD_US  = 1200; // Quay thuận (Xung mạnh mẽ, đủ lực kéo cơ cấu đẩy/gạt)
+const int SERVO_REV_US  = 1800; // Quay nghịch (Xung mạnh mẽ, đủ lực kéo cơ cấu đẩy/gạt)
 
-const int SERVO_TARGET_PULSES = 70; // Hành trình 70 xung (70 * 20ms = 1400ms)
+// Cấu hình số xung riêng cho từng Servo:
+// - Servo 1 (Cấp phôi): Thuận 65 xung, Nghịch 68 xung
+const int SERVO1_FWD_PULSES = 65; // 65 * 20ms = 1300ms
+const int SERVO1_REV_PULSES = 68; // 68 * 20ms = 1360ms
+
+// - Servo 2 (Gạt phôi): Thuận 68 xung, Nghịch 70 xung
+const int SERVO2_FWD_PULSES = 68; // 68 * 20ms = 1360ms
+const int SERVO2_REV_PULSES = 70; // 70 * 20ms = 1400ms
+
 const unsigned long CAMERA_STOP_TIME_MS = 8000; // Dừng 8 giây tại Camera
 
 // Tốc độ băng tải
@@ -76,13 +84,13 @@ int prevSensor1 = HIGH;
 int prevSensor2 = HIGH;
 
 // =============================================================================
-// 4. BỘ ĐIỀU KHIỂN SERVO THỰC THI 152 XUNG ĐẢO CHIỀU (AN TOÀN TUYỆT ĐỐI)
+// 4. BỘ ĐIỀU KHIỂN SERVO THỰC THI ĐẢO CHIỀU ĐỘC LẬP TỪNG SERVO
 // =============================================================================
 enum ServoRunStage {
   STAGE_IDLE,        // Đang dừng
-  STAGE_RUN_FWD,     // Đang quay thuận 152 xung
+  STAGE_RUN_FWD,     // Đang quay thuận
   STAGE_PAUSE_100MS, // Nghỉ đệm 100ms
-  STAGE_RUN_REV      // Đang quay nghịch 152 xung
+  STAGE_RUN_REV      // Đang quay nghịch
 };
 
 struct ServoUnit {
@@ -90,18 +98,21 @@ struct ServoUnit {
   int pulseCount = 0;
   unsigned long lastPulseTimeMs = 0;
   unsigned long pauseStartTimeMs = 0;
+  int targetFwdPulses = 65; // Số xung quay thuận riêng
+  int targetRevPulses = 68; // Số xung quay nghịch riêng
 };
 
-ServoUnit s1;
-ServoUnit s2;
+// Khởi tạo thông số cho từng Servo
+ServoUnit s1 = {STAGE_IDLE, 0, 0, 0, SERVO1_FWD_PULSES, SERVO1_REV_PULSES};
+ServoUnit s2 = {STAGE_IDLE, 0, 0, 0, SERVO2_FWD_PULSES, SERVO2_REV_PULSES};
 
-// Kích hoạt chạy: Quay thuận 152 xung -> Dừng 100ms -> Quay nghịch 152 xung -> Dừng
+// Kích hoạt chạy: Quay thuận -> Dừng 100ms -> Quay nghịch -> Dừng
 void triggerMotion(Servo &srv, ServoUnit &unit, const char* name) {
   unit.stage = STAGE_RUN_FWD;
   unit.pulseCount = 0;
   unit.lastPulseTimeMs = millis();
   srv.writeMicroseconds(SERVO_FWD_US);
-  Serial.printf("\n[%s] Bắt đầu quay thuận 152 xung...\n", name);
+  Serial.printf("\n[%s] Bắt đầu quay thuận %d xung...\n", name, unit.targetFwdPulses);
 }
 
 // Cập nhật từng xung 20ms trong loop
@@ -114,12 +125,12 @@ void updateUnit(Servo &srv, ServoUnit &unit, const char* name) {
         unit.lastPulseTimeMs = now;
         unit.pulseCount++;
 
-        if (unit.pulseCount % 30 == 0 || unit.pulseCount == SERVO_TARGET_PULSES) {
-          Serial.printf("[%s] Quay thuận: %d/%d xung\n", name, unit.pulseCount, SERVO_TARGET_PULSES);
+        if (unit.pulseCount % 30 == 0 || unit.pulseCount == unit.targetFwdPulses) {
+          Serial.printf("[%s] Quay thuận: %d/%d xung\n", name, unit.pulseCount, unit.targetFwdPulses);
         }
 
-        // Đủ 152 xung thuận -> Dừng đệm 100ms
-        if (unit.pulseCount >= SERVO_TARGET_PULSES) {
+        // Đủ xung thuận -> Dừng đệm 100ms
+        if (unit.pulseCount >= unit.targetFwdPulses) {
           srv.writeMicroseconds(SERVO_STOP_US);
           unit.stage = STAGE_PAUSE_100MS;
           unit.pauseStartTimeMs = now;
@@ -134,7 +145,7 @@ void updateUnit(Servo &srv, ServoUnit &unit, const char* name) {
         unit.pulseCount = 0;
         unit.lastPulseTimeMs = now;
         srv.writeMicroseconds(SERVO_REV_US);
-        Serial.printf("[%s] Đổi chiều quay nghịch 152 xung về gốc...\n", name);
+        Serial.printf("[%s] Đổi chiều quay nghịch %d xung về gốc...\n", name, unit.targetRevPulses);
       }
       break;
     }
@@ -144,12 +155,12 @@ void updateUnit(Servo &srv, ServoUnit &unit, const char* name) {
         unit.lastPulseTimeMs = now;
         unit.pulseCount++;
 
-        if (unit.pulseCount % 30 == 0 || unit.pulseCount == SERVO_TARGET_PULSES) {
-          Serial.printf("[%s] Quay nghịch: %d/%d xung\n", name, unit.pulseCount, SERVO_TARGET_PULSES);
+        if (unit.pulseCount % 30 == 0 || unit.pulseCount == unit.targetRevPulses) {
+          Serial.printf("[%s] Quay nghịch: %d/%d xung\n", name, unit.pulseCount, unit.targetRevPulses);
         }
 
-        // Đủ 152 xung nghịch -> DỪNG HOÀN TOÀN
-        if (unit.pulseCount >= SERVO_TARGET_PULSES) {
+        // Đủ xung nghịch -> DỪNG HOÀN TOÀN
+        if (unit.pulseCount >= unit.targetRevPulses) {
           srv.writeMicroseconds(SERVO_STOP_US);
           unit.stage = STAGE_IDLE;
           unit.pulseCount = 0;
@@ -348,7 +359,7 @@ void loop() {
     // TRẠNG THÁI 0: SERVO 1 CẤP PHÔI - BĂNG TẢI ĐỨNG YÊN CHỜ
     case STATE_SERVO1_FEED: {
       // Không gọi triggerStep() -> băng tải đứng yên hoàn toàn
-      // Khi Servo 1 hoàn tất 70 xung thuận + 70 xung nghịch -> sang tăng tốc
+      // Khi Servo 1 hoàn tất (65 xung thuận + 68 xung nghịch) -> sang tăng tốc
       if (s1.stage == STAGE_IDLE) {
         Serial.println(">>> [SERVO 1 ĐÃ XONG] Bắt đầu khởi động băng tải...");
         currentState = STATE_FEED_AND_START;
@@ -412,7 +423,7 @@ void loop() {
         Serial.println(">>> [BĂNG TẢI] DỪNG LẠI ĐỂ 2 SERVO HOẠT ĐỘNG!");
         Serial.println(">>> [CẢ 2 SERVO] KÍCH HOẠT QUAY 70 XUNG THUẬN -> NGHỊCH!");
 
-        // Kích hoạt CẢ 2 SERVO quay 70 xung thuận -> Dừng 100ms -> Quay 70 xung nghịch
+        // Kích hoạt CẢ 2 SERVO: Servo 1 (65/68), Servo 2 (68/70)
         triggerMotion(servo1, s1, "SERVO 1");
         triggerMotion(servo2, s2, "SERVO 2");
 

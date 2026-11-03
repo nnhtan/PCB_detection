@@ -18,6 +18,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  sendConveyorResult: (isOk) =>
+    request("/api/conveyor/result", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_ok: isOk }),
+    }),
+  resumeConveyor: () =>
+    request("/api/conveyor/resume", { method: "POST" }),
+  waitForConveyorEvent: () => request("/api/conveyor/event?timeout=1"),
   delete: (path) => request(path, { method: "DELETE" }),
   cameraStream: `${API_BASE}/api/camera/stream`,
 };

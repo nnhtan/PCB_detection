@@ -29,7 +29,6 @@ const int PIN_SERVO_2 = 32; // Servo 2: GẠT PHÔI (GPIO 32)
 const int SERVO_STOP_US = 1500; // Dừng hoàn toàn
 const int SERVO_FWD_US  = 1200; // Quay thuận (Xung mạnh mẽ, đủ lực kéo cơ cấu đẩy/gạt)
 const int SERVO_REV_US  = 1800; // Quay nghịch (Xung mạnh mẽ, đủ lực kéo cơ cấu đẩy/gạt)
-
 // Cấu hình số xung riêng cho từng Servo:
 // - Servo 1 (Cấp phôi): Thuận 65 xung, Nghịch 68 xung
 const int SERVO1_FWD_PULSES = 65; // 65 * 20ms = 1300ms
@@ -38,8 +37,6 @@ const int SERVO1_REV_PULSES = 68; // 68 * 20ms = 1360ms
 // - Servo 2 (Gạt phôi): Thuận 68 xung, Nghịch 70 xung
 const int SERVO2_FWD_PULSES = 68; // 68 * 20ms = 1360ms
 const int SERVO2_REV_PULSES = 70; // 70 * 20ms = 1400ms
-
-const unsigned long CAMERA_STOP_TIME_MS = 8000; // Dừng 8 giây tại Camera
 
 // Tốc độ băng tải
 const unsigned long RAMP_UP_TIME_MS = 400;   
@@ -57,12 +54,22 @@ enum SystemState {
   STATE_SERVO1_FEED,          // Servo 1 cấp phôi trước (băng tải DỪNG), chờ Servo 1 hoàn tất
   STATE_FEED_AND_START,       // Băng tải tăng tốc (Servo 1 đã xong)
   STATE_RUN_WAIT_SENSOR1,     // Đang chạy chờ Cảm biến 1 (Camera)
-  STATE_CAMERA_STOP_8S,       // Dừng 8s tại Camera
+  STATE_CAMERA_STOP_WAIT_SCAN, // Dừng tại camera chờ quét xong
   STATE_RUN_WAIT_SENSOR2,     // Chạy tiếp chờ Cảm biến 2
-  STATE_SERVO_EJECTING        // Cảm biến 2 thấy -> 2 servo chạy 70 xung
+  STATE_WAIT_INSPECTION_RESULT, // Dừng ở cảm biến 2 chờ kết quả kiểm tra
+  STATE_SERVOS_PROCESSING     // Chờ servo 1 và servo 2 hoàn tất
+};
+
+enum InspectionResult {
+  INSPECTION_UNKNOWN,
+  INSPECTION_OK,
+  INSPECTION_FAULTY
 };
 
 SystemState currentState = STATE_IDLE;
+InspectionResult inspectionResult = INSPECTION_UNKNOWN;
+char serialCommandBuffer[40];
+size_t serialCommandLength = 0;
 
 unsigned long stateStartTimeMs = 0;
 unsigned long lastStepUs = 0;
@@ -103,8 +110,24 @@ struct ServoUnit {
 };
 
 // Khởi tạo thông số cho từng Servo
-ServoUnit s1 = {STAGE_IDLE, 0, 0, 0, SERVO1_FWD_PULSES, SERVO1_REV_PULSES};
-ServoUnit s2 = {STAGE_IDLE, 0, 0, 0, SERVO2_FWD_PULSES, SERVO2_REV_PULSES};
+ServoUnit s1;
+ServoUnit s2;
+
+void initializeServoUnits() {
+  s1.stage = STAGE_IDLE;
+  s1.pulseCount = 0;
+  s1.lastPulseTimeMs = 0;
+  s1.pauseStartTimeMs = 0;
+  s1.targetFwdPulses = SERVO1_FWD_PULSES;
+  s1.targetRevPulses = SERVO1_REV_PULSES;
+
+  s2.stage = STAGE_IDLE;
+  s2.pulseCount = 0;
+  s2.lastPulseTimeMs = 0;
+  s2.pauseStartTimeMs = 0;
+  s2.targetFwdPulses = SERVO2_FWD_PULSES;
+  s2.targetRevPulses = SERVO2_REV_PULSES;
+}
 
 // Kích hoạt chạy: Quay thuận -> Dừng 100ms -> Quay nghịch -> Dừng
 void triggerMotion(Servo &srv, ServoUnit &unit, const char* name) {
@@ -212,6 +235,7 @@ void doStop() {
 
   currentState = STATE_IDLE;
   currentSpeedSps = START_SPEED_SPS;
+  inspectionResult = INSPECTION_UNKNOWN;
 
   // Dừng ngay lập tức 2 Servo
   servo1.writeMicroseconds(SERVO_STOP_US);
@@ -230,27 +254,122 @@ void doStart() {
   Serial.println("=======================================================\n");
 
   currentState = STATE_SERVO1_FEED;
+  inspectionResult = INSPECTION_UNKNOWN;
   triggerMotion(servo1, s1, "SERVO 1 (CẤP PHÔI)");
+}
+
+void handleInspectionResultAtSensor2() {
+  if (currentState != STATE_WAIT_INSPECTION_RESULT) {
+    return;
+  }
+
+  if (inspectionResult == INSPECTION_FAULTY) {
+    Serial.println(">>> [KẾT QUẢ] MẠCH LỖI -> SERVO 1 VÀ SERVO 2 CÙNG HOẠT ĐỘNG!");
+    triggerMotion(servo1, s1, "SERVO 1 (CẤP PHÔI)");
+    triggerMotion(servo2, s2, "SERVO 2 (ĐẨY MẠCH LỖI)");
+    currentState = STATE_SERVOS_PROCESSING;
+  } else if (inspectionResult == INSPECTION_OK) {
+    Serial.println(">>> [KẾT QUẢ] MẠCH ĐẠT -> SERVO 1 CẤP PHÔI.");
+    triggerMotion(servo1, s1, "SERVO 1 (CẤP PHÔI)");
+    currentState = STATE_SERVOS_PROCESSING;
+    inspectionResult = INSPECTION_UNKNOWN;
+  }
+}
+
+void processSerialCommand(String command) {
+  command.trim();
+  command.toUpperCase();
+
+  if (command.startsWith("RESULT:")) {
+    String verdict = command.substring(7);
+    InspectionResult receivedResult;
+    if (verdict == "OK") {
+      receivedResult = INSPECTION_OK;
+    } else if (verdict == "FAULTY") {
+      receivedResult = INSPECTION_FAULTY;
+    } else {
+      Serial.println("NACK:INVALID_RESULT");
+      return;
+    }
+
+    if (currentState != STATE_CAMERA_STOP_WAIT_SCAN &&
+        currentState != STATE_RUN_WAIT_SENSOR2 &&
+        currentState != STATE_WAIT_INSPECTION_RESULT) {
+      Serial.println("NACK:NOT_WAITING_FOR_RESULT");
+      return;
+    }
+
+    if (inspectionResult != INSPECTION_UNKNOWN &&
+        inspectionResult != receivedResult) {
+      Serial.println("NACK:RESULT_ALREADY_SET");
+      return;
+    }
+
+    inspectionResult = receivedResult;
+    handleInspectionResultAtSensor2();
+    Serial.printf("ACK:RESULT:%s\n", verdict.c_str());
+    return;
+  }
+
+  if (command == "RESUME") {
+    if (currentState != STATE_CAMERA_STOP_WAIT_SCAN) {
+      Serial.println("NACK:NOT_WAITING_FOR_SCAN");
+      return;
+    }
+
+    currentState = STATE_RUN_WAIT_SENSOR2;
+    Serial.println("ACK:RESUME");
+    return;
+  }
+
+  if (command == "0" || command == "X" || command == "E" || command == "STOP") {
+    doStop();
+  } else if (command == "S" || command == "1") {
+    if (currentState == STATE_IDLE) {
+      doStart();
+    } else {
+      Serial.println(">>> Đang chạy -> Cấp thêm 1 phôi mới (Servo 1)!");
+      triggerMotion(servo1, s1, "SERVO 1 (CẤP PHÔI)");
+    }
+  } else if (command.length() > 0) {
+    Serial.println("NACK:UNKNOWN_COMMAND");
+  }
+}
+
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\r' || c == '\n') {
+      if (serialCommandLength > 0) {
+        serialCommandBuffer[serialCommandLength] = '\0';
+        processSerialCommand(String(serialCommandBuffer));
+        serialCommandLength = 0;
+      }
+      continue;
+    }
+
+    if (serialCommandLength == 0 &&
+        (c == 's' || c == 'S' || c == '1' ||
+         c == '0' || c == 'x' || c == 'X' || c == 'e' || c == 'E')) {
+      char command[2] = {c, '\0'};
+      processSerialCommand(String(command));
+      continue;
+    }
+
+    if (serialCommandLength < sizeof(serialCommandBuffer) - 1) {
+      serialCommandBuffer[serialCommandLength++] = c;
+    } else {
+      serialCommandLength = 0;
+      Serial.println("NACK:COMMAND_TOO_LONG");
+    }
+  }
 }
 
 // Xử lý nút bấm với bộ lọc chống rung
 void checkButtons() {
   unsigned long now = millis();
 
-  // Nhận lệnh phím từ Serial: 's' hoặc '1' = START | '0' hoặc 'x' = STOP
-  if (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '0' || c == 'x' || c == 'X' || c == 'e' || c == 'E') {
-      doStop();
-    } else if (c == 's' || c == 'S' || c == '1') {
-      if (currentState == STATE_IDLE) {
-        doStart();
-      } else {
-        Serial.println(">>> Đang chạy -> Cấp thêm 1 phôi mới (Servo 1)!");
-        triggerMotion(servo1, s1, "SERVO 1 (CẤP PHÔI)");
-      }
-    }
-  }
+  readSerialCommands();
 
   // Nút START (GPIO 25 - Nối GND -> Ấn = LOW)
   int rStart = digitalRead(PIN_BTN_START);
@@ -322,6 +441,8 @@ void setup() {
   prevSensor2  = digitalRead(PIN_SENSOR_2);
 
   // 3. Khởi tạo 2 Servo
+  initializeServoUnits();
+
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
@@ -389,59 +510,51 @@ void loop() {
       int s1Val = digitalRead(PIN_SENSOR_1);
       // Chỉ kích hoạt 1 lần khi có phôi mới đi tới (bắt cạnh rơi)
       if (s1Val == SENSOR_DETECT_LEVEL && prevSensor1 != SENSOR_DETECT_LEVEL) {
+        Serial.println("EVENT:SENSOR1");
         Serial.println("\n>>> [CẢM BIẾN 1] PHÁT HIỆN PHÔI TẠI CAMERA!");
-        Serial.println(">>> [BĂNG TẢI] DỪNG ĐÚNG 8 GIÂY ĐỂ CHỤP ẢNH & KIỂM TRA...");
+        Serial.println(">>> [BĂNG TẢI] DỪNG CHỜ QUÉT XONG TẠI CAMERA...");
         
-        stateStartTimeMs = now;
-        currentState = STATE_CAMERA_STOP_8S;
+        inspectionResult = INSPECTION_UNKNOWN;
+        currentState = STATE_CAMERA_STOP_WAIT_SCAN;
       }
       prevSensor1 = s1Val;
       break;
     }
 
-    // TRẠNG THÁI 3: DỪNG 8 GIÂY TẠI CAMERA
-    case STATE_CAMERA_STOP_8S: {
-      // Dừng băng tải hoàn toàn (không triggerStep)
-      if (now - stateStartTimeMs >= CAMERA_STOP_TIME_MS) {
-        Serial.println("\n>>> [CAMERA ĐÃ XONG] HẾT 8 GIÂY DỪNG!");
-        Serial.println(">>> [BĂNG TẢI] TIẾP TỤC CHẠY ĐẾN KHI CẢM BIẾN 2 CÓ TÍN HIỆU...");
-        
-        stateStartTimeMs = now;
-        currentState = STATE_RUN_WAIT_SENSOR2;
-      }
+    // Chờ lệnh RESUME sau khi camera quét xong.
+    case STATE_CAMERA_STOP_WAIT_SCAN: {
       break;
     }
 
     // TRẠNG THÁI 4: CHẠY TIẾP -> CHỜ CẢM BIẾN 2 (CUỐI BĂNG TẢI)
     case STATE_RUN_WAIT_SENSOR2: {
-      triggerStep(MAX_SPEED_SPS);
-
       int s2Val = digitalRead(PIN_SENSOR_2);
       // Chỉ kích hoạt 1 lần duy nhất khi phát hiện phôi mới (bắt cạnh rơi)
       if (s2Val == SENSOR_DETECT_LEVEL && prevSensor2 != SENSOR_DETECT_LEVEL) {
         Serial.println("\n>>> [CẢM BIẾN 2] PHÁT HIỆN PHÔI Ở CUỐI BĂNG TẢI!");
-        Serial.println(">>> [BĂNG TẢI] DỪNG LẠI ĐỂ 2 SERVO HOẠT ĐỘNG!");
-        Serial.println(">>> [CẢ 2 SERVO] KÍCH HOẠT QUAY 70 XUNG THUẬN -> NGHỊCH!");
-
-        // Kích hoạt CẢ 2 SERVO: Servo 1 (65/68), Servo 2 (68/70)
-        triggerMotion(servo1, s1, "SERVO 1");
-        triggerMotion(servo2, s2, "SERVO 2");
-
-        currentState = STATE_SERVO_EJECTING;
+        Serial.println(">>> [BĂNG TẢI] DỪNG LẠI ĐỂ XỬ LÝ KẾT QUẢ KIỂM TRA!");
+        currentState = STATE_WAIT_INSPECTION_RESULT;
+        if (inspectionResult == INSPECTION_UNKNOWN) {
+          Serial.println(">>> [KẾT QUẢ] CHƯA CÓ -> GIỮ MẠCH, CHỜ KẾT QUẢ TỪ WEB.");
+        }
+        handleInspectionResultAtSensor2();
+      } else {
+        triggerStep(MAX_SPEED_SPS);
       }
       prevSensor2 = s2Val;
       break;
     }
 
-    // TRẠNG THÁI 5: BĂNG TẢI DỪNG TRONG KHI 2 SERVO HOẠT ĐỘNG
-    case STATE_SERVO_EJECTING: {
-      // BĂNG TẢI DỪNG HOÀN TOÀN (KHÔNG gọi triggerStep) để gạt phôi an toàn, không bị xô lệch phôi!
+    // Chờ kết quả kiểm tra nếu mạch tới cảm biến 2 trước kết quả từ web.
+    case STATE_WAIT_INSPECTION_RESULT:
+      break;
 
-      // Khi CẢ 2 SERVO đã hoàn thành đủ hành trình và về vị trí ban đầu (STAGE_IDLE):
+    // Chờ các servo hoàn tất thao tác tại cảm biến 2.
+    case STATE_SERVOS_PROCESSING: {
       if (s1.stage == STAGE_IDLE && s2.stage == STAGE_IDLE) {
-        Serial.println("\n>>> [HOÀN TẤT GẠT PHÔI] Cả 2 Servo đã thu về vị trí ban đầu (Biến xung = 0).");
+        Serial.println("\n>>> [HOÀN TẤT XỬ LÝ] Các servo đã về vị trí ban đầu.");
         Serial.println(">>> [BĂNG TẢI] TIẾP TỤC CHẠY ĐÓN PHÔI MỚI TẠI CẢM BIẾN 1.\n");
-
+        inspectionResult = INSPECTION_UNKNOWN;
         currentState = STATE_RUN_WAIT_SENSOR1;
       }
       break;

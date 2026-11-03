@@ -357,6 +357,17 @@ def order_points(points):
     return np.roll(ordered, -start, axis=0)
 
 
+def order_board_corners_for_reference(corners, reference_aspect):
+    ordered = order_points(corners)
+    first_edge_length = np.linalg.norm(ordered[1] - ordered[0])
+    second_edge_length = np.linalg.norm(ordered[2] - ordered[1])
+    reference_is_landscape = reference_aspect >= 1.0
+    first_edge_is_long = first_edge_length >= second_edge_length
+    if reference_is_landscape != first_edge_is_long:
+        ordered = np.roll(ordered, -1, axis=0)
+    return ordered
+
+
 _BOARD_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 _ROI_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
 _ROI_OPEN_KERNEL = np.ones((5, 5), dtype=np.uint8)
@@ -370,7 +381,53 @@ _DARK_SAT_LOW = 0
 _DARK_SAT_HIGH = 255
 
 
-def find_board_corners(frame, reference_aspect=None):
+def _board_contour_candidate(
+    contour, detect_width, detect_height, min_area, reference_aspect
+):
+    area = cv2.contourArea(contour)
+    if area < min_area or area > 0.75 * detect_width * detect_height:
+        return None
+
+    x, y, width, height = cv2.boundingRect(contour)
+    if (
+        x <= 3
+        or y <= 3
+        or x + width >= detect_width - 3
+        or y + height >= detect_height - 3
+    ):
+        return None
+
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    if hull_area <= 0 or area / hull_area < 0.20:
+        return None
+    rect = cv2.minAreaRect(hull)
+    rect_width, rect_height = rect[1]
+    rect_area = rect_width * rect_height
+    if rect_area <= 0:
+        return None
+
+    rectangularity = hull_area / rect_area
+    aspect = max(rect_width, rect_height) / max(
+        1, min(rect_width, rect_height)
+    )
+    if rectangularity < 0.55:
+        return None
+    if reference_aspect is not None:
+        if not 0.5 * reference_aspect <= aspect <= 2.0 * reference_aspect:
+            return None
+    elif not 1.0 <= aspect <= 6.0:
+        return None
+
+    return area * rectangularity * (area / hull_area), rect
+
+
+def find_board_corners(
+    frame,
+    reference_aspect=None,
+    padding_ratio=BOARD_PADDING_RATIO,
+    include_dark_regions=False,
+):
     frame_height, frame_width = frame.shape[:2]
     detect_width = BOARD_DETECTION_SIZE[0]
     scale = detect_width / frame_width
@@ -398,45 +455,55 @@ def find_board_corners(frame, reference_aspect=None):
             for contour in sorted(
                 contours, key=cv2.contourArea, reverse=True
             )[:15]:
-                area = cv2.contourArea(contour)
-                if area < min_area:
-                    continue
-                x, y, width, height = cv2.boundingRect(contour)
-                # Bỏ qua nếu contour chiếm gần hết khung hình (viền băng tải / camera)
-                if area > 0.75 * detect_width * detect_height:
-                    continue
-                if x <= 3 or y <= 3 or x + width >= detect_width - 3 or y + height >= detect_height - 3:
-                    continue
+                candidate = _board_contour_candidate(
+                    contour,
+                    detect_width,
+                    detect_height,
+                    min_area,
+                    reference_aspect,
+                )
+                if candidate is not None and (
+                    best_candidate is None or candidate[0] > best_candidate[0]
+                ):
+                    best_candidate = candidate
 
-                hull = cv2.convexHull(contour)
-                hull_area = cv2.contourArea(hull)
-                if hull_area <= 0 or area / hull_area < 0.20:
-                    continue
-                rect = cv2.minAreaRect(hull)
-                rect_width, rect_height = rect[1]
-                rect_area = rect_width * rect_height
-                if rect_area <= 0:
-                    continue
-                rectangularity = hull_area / rect_area
-                aspect = max(rect_width, rect_height) / max(1, min(rect_width, rect_height))
-                if rectangularity < 0.55:
-                    continue
-                if reference_aspect is not None:
-                    if not 0.5 * reference_aspect <= aspect <= 2.0 * reference_aspect:
-                        continue
-                elif not 1.0 <= aspect <= 6.0:
-                    continue
-
-                score = area * rectangularity * (area / hull_area)
-                if best_candidate is None or score > best_candidate[0]:
-                    best_candidate = (score, rect)
+    if include_dark_regions:
+        for value_threshold in (60, _DARK_VALUE_THRESH):
+            dark_mask = cv2.inRange(
+                gray,
+                np.zeros((), dtype=np.uint8),
+                np.full((), value_threshold, dtype=np.uint8),
+            )
+            closed = cv2.morphologyEx(
+                dark_mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+                iterations=2,
+            )
+            contours, _ = cv2.findContours(
+                closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for contour in sorted(
+                contours, key=cv2.contourArea, reverse=True
+            )[:15]:
+                candidate = _board_contour_candidate(
+                    contour,
+                    detect_width,
+                    detect_height,
+                    min_area,
+                    reference_aspect,
+                )
+                if candidate is not None and (
+                    best_candidate is None or candidate[0] > best_candidate[0]
+                ):
+                    best_candidate = candidate
 
     if best_candidate is None:
         return None
 
     corners = order_points(cv2.boxPoints(best_candidate[1]))
     center = corners.mean(axis=0)
-    corners = center + (corners - center) * (1 + 2 * BOARD_PADDING_RATIO)
+    corners = center + (corners - center) * (1 + 2 * padding_ratio)
     corners[:, 0] *= frame_width / detect_width
     corners[:, 1] *= frame_height / detect_height
     return corners
@@ -1177,7 +1244,7 @@ def match_components(
         )
         location_class_mismatch = (
             ~class_match
-            & (dist <= mismatch_radius)
+            & ((dist <= mismatch_radius) | contains)
             & ~too_large
         )
 
@@ -2294,7 +2361,7 @@ class PCBPipeline:
     def inspect_pcb(self, frame, conf=DEFAULT_CONF, imgsz=DEFAULT_IMGSZ,
                     tolerance_ratio=DEFAULT_TOLERANCE_RATIO, extra_allowed=DEFAULT_EXTRA_ALLOWED,
                     missing_allowed=DEFAULT_MISSING_ALLOWED, auto_crop=True,
-                    fast_mode=False):
+                    fast_mode=False, prealigned=False):
         start_time = time.time()
 
         if self.reference_image is None or not self.reference_components:
@@ -2316,7 +2383,11 @@ class PCBPipeline:
         )
 
         crop_method = "full"
-        if auto_crop:
+        if prealigned:
+            board_crop = frame
+            board_transform = np.eye(3, dtype=np.float64)
+            crop_method = "reference_homography"
+        elif auto_crop:
             try:
                 board_crop, board_transform, crop_method = self.crop_board(frame)
             except BoardCropError:
@@ -2693,14 +2764,23 @@ class PCBPipeline:
             self._apply_reference_class_authority(
                 self.reference_components, shown_detections, matches
             )
-            _, position_stats = evaluate_board_status(
+            status, position_stats = evaluate_board_status(
                 self.reference_components, shown_detections, matches,
                 used_references, aligned=True,
                 missing_allowed=missing_allowed, extra_allowed=extra_allowed,
                 conf_thresh=conf,
             )
-            status = inventory_status
-            stats = {**inventory_stats, "class_mismatch": position_stats["class_mismatch"]}
+            stats = {
+                key: position_stats[key]
+                for key in (
+                    "matched",
+                    "class_mismatch",
+                    "missing",
+                    "extra",
+                    "missing_components",
+                    "extra_components",
+                )
+            }
         else:
             status = inventory_status
             stats = inventory_stats
@@ -2800,11 +2880,13 @@ class PCBPipeline:
         ]
         logger.info(
             "Inspection matching result: status=%s matches=%d missing=%d extra=%d "
-            "missing_components=%s extra_components=%s.",
+            "detections=%d references=%d missing_components=%s extra_components=%s.",
             status,
             len(matches),
-            inventory_stats["missing"],
-            inventory_stats["extra"],
+            stats["missing"],
+            stats["extra"],
+            len(shown_detections),
+            len(self.reference_components),
             [component["class"] for component in missing_details],
             [component["class"] for component in extra_details],
         )
@@ -2913,14 +2995,12 @@ class PCBPipeline:
             }[status],
             "aligned": aligned,
             "qa_available": aligned,
-            "comparison_scope": "component_count",
+            "comparison_scope": "reference_position" if aligned else "component_count",
             "comparison_note": (
-                "Kết luận dựa trên số lượng linh kiện theo từng loại. "
-                + (
-                    "Ảnh chưa căn chỉnh được nên chưa thể xác nhận vị trí."
-                    if not aligned
-                    else "Căn chỉnh vị trí chỉ dùng để hiển thị chi tiết đối chiếu."
-                )
+                "Kết luận dựa trên đối chiếu vị trí với reference; tổng số detections "
+                "được hiển thị riêng."
+                if aligned
+                else "Ảnh chưa căn chỉnh được; kết luận tạm dựa trên tổng số detections."
             ),
             "alignment_method": align_method,
             "alignment_error": alignment_error,

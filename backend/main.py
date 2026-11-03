@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from backend.app.api.api import api_router
 from backend.app.core import config
 from backend.app.services.camera_stream import CameraManager
+from backend.app.services.conveyor import ConveyorClient
 from backend.app.services.pcb_engine import PCBPipeline
 from backend.app.services.reference_catalog import ReferenceCatalog
 
@@ -34,6 +35,14 @@ async def lifespan(application: FastAPI):
         operation_lock=application.state.pipeline.operation_lock,
         legacy_detected_path=config.REFERENCE_DETECTED_PATH,
     )
+    application.state.conveyor = None
+    if config.CONVEYOR_ENABLED:
+        application.state.conveyor = ConveyorClient(
+            port=config.CONVEYOR_PORT,
+            baudrate=config.CONVEYOR_BAUDRATE,
+            timeout=config.CONVEYOR_TIMEOUT,
+        )
+        await asyncio.to_thread(application.state.conveyor.connect)
     application.state.camera = CameraManager(config.CAMERA_SOURCE)
     connected, message = await asyncio.to_thread(
         application.state.camera.connect,
@@ -43,8 +52,12 @@ async def lifespan(application: FastAPI):
         logger.info("Camera tự kết nối khi backend khởi động: %s", message)
     else:
         logger.warning("Không thể tự kết nối camera khi backend khởi động: %s", message)
-    yield
-    application.state.camera.disconnect()
+    try:
+        yield
+    finally:
+        if application.state.conveyor is not None:
+            application.state.conveyor.close()
+        application.state.camera.disconnect()
 
 
 app = FastAPI(title="PCB Vision AI", version="1.0.0", lifespan=lifespan)

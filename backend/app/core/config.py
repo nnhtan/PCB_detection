@@ -1,6 +1,19 @@
 import os
 from pathlib import Path
 
+
+def _environment_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} phải là true/false hoặc 1/0.")
+
+
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 PROJECT_DIR = BACKEND_DIR.parent
 DEFAULT_MODEL_PATH = BACKEND_DIR / "models" / "best.pt"
@@ -45,3 +58,7 @@ SAMPLE_IMAGE_PATH = Path(
 FRONTEND_DIST_DIR = PROJECT_DIR / "frontend" / "dist"
 DEFAULT_CAMERA_IP = "169.254.128.194"
 CAMERA_SOURCE = os.getenv("PCB_CAMERA_SOURCE", DEFAULT_CAMERA_IP)
+CONVEYOR_ENABLED = _environment_flag("PCB_CONVEYOR_ENABLED")
+CONVEYOR_PORT = os.getenv("PCB_SERIAL_PORT", "COM3")
+CONVEYOR_BAUDRATE = int(os.getenv("PCB_SERIAL_BAUDRATE", "115200"))
+CONVEYOR_TIMEOUT = float(os.getenv("PCB_SERIAL_TIMEOUT", "5"))

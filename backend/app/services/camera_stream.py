@@ -2,11 +2,13 @@ import logging
 import sys
 import threading
 import time
+from collections import deque
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+FRAME_HISTORY_SIZE = 12
 
 
 class CameraManager:
@@ -16,6 +18,9 @@ class CameraManager:
         self.lock = threading.Lock()
         self.frame: np.ndarray | None = None
         self.frame_id = 0
+        self.frame_history: deque[tuple[int, np.ndarray]] = deque(
+            maxlen=FRAME_HISTORY_SIZE
+        )
         self.fps = 0.0
         self.running = False
         self.thread: threading.Thread | None = None
@@ -156,6 +161,7 @@ class CameraManager:
             cap = self.cap
             self.cap = None
             self.frame = None
+            self.frame_history.clear()
             self.fps = 0.0
         if cap is not None:
             cap.release()
@@ -256,6 +262,7 @@ class CameraManager:
             with self.lock:
                 self.frame = frame
                 self.frame_id += 1
+                self.frame_history.append((self.frame_id, frame))
             frame_count += 1
             now = time.monotonic()
             if now - last_time >= 1.0:
@@ -314,6 +321,7 @@ class CameraManager:
                 with self.lock:
                     self.frame = frame
                     self.frame_id += 1
+                    self.frame_history.append((self.frame_id, frame))
                 frame_count += 1
                 now = time.monotonic()
                 if now - last_time >= 1.0:
@@ -358,6 +366,13 @@ class CameraManager:
             if self.frame is None:
                 return None, self.frame_id, self.fps
             return self.frame.copy(), self.frame_id, self.fps
+
+    def get_recent_frames(self) -> list[tuple[np.ndarray, int]]:
+        with self.lock:
+            return [
+                (frame.copy(), frame_id)
+                for frame_id, frame in reversed(self.frame_history)
+            ]
 
     def get_status(self) -> dict[str, object]:
         with self.lock:

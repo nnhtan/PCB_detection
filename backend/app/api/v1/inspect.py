@@ -1,7 +1,13 @@
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
-from backend.app.api.v1.common import get_pipeline, inspection_payload, read_upload, run_inspection
+from backend.app.api.v1.common import (
+    get_pipeline,
+    inspection_payload,
+    read_upload,
+    run_inspection,
+    run_tilted_inspection,
+)
 
 router = APIRouter()
 
@@ -32,5 +38,33 @@ async def inspect_board(
     }
     result = await run_in_threadpool(
         run_inspection, get_pipeline(request), frame, values
+    )
+    return inspection_payload(result, filename)
+
+
+@router.post("/inspect/tilted")
+async def inspect_tilted_board(
+    request: Request,
+    image: UploadFile = File(...),
+    conf: float | None = Form(None),
+    imgsz: int | None = Form(None),
+    tolerance_ratio: float | None = Form(None),
+    extra_allowed: int | None = Form(None),
+    missing_allowed: int | None = Form(None),
+):
+    frame, filename = await read_upload(image)
+    values = {
+        key: value
+        for key, value in {
+            "conf": conf,
+            "imgsz": imgsz,
+            "tolerance_ratio": tolerance_ratio,
+            "extra_allowed": extra_allowed,
+            "missing_allowed": missing_allowed,
+        }.items()
+        if value is not None
+    }
+    result = await run_in_threadpool(
+        run_tilted_inspection, get_pipeline(request), frame, values
     )
     return inspection_payload(result, filename)

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRight, Crop, ImagePlus, LoaderCircle, ScanLine, Sparkles } from "lucide-react";
+import { ArrowRight, Crop, ImagePlus, LoaderCircle, RotateCw, ScanLine, Sparkles } from "lucide-react";
 import PageHeader from "../common/PageHeader.jsx";
 import UploadCard from "../common/UploadCard.jsx";
 import InspectionResults from "./InspectionResults.jsx";
@@ -13,8 +13,16 @@ export default function InspectPanel() {
   const [conf, setConf] = useState(0.35);
   const [tolerance, setTolerance] = useState(0.045);
   const [autoCrop, setAutoCrop] = useState(true);
+  const [scanMode, setScanMode] = useState("standard");
   const reference = useAppStore((state) => state.reference);
-  const { result, error, busy, inspect } = useInspect();
+  const { result, setResult, error, setError, busy, inspect } = useInspect(
+    scanMode === "tilted" ? "/api/inspect/tilted" : "/api/inspect",
+  );
+  const selectScanMode = (mode) => {
+    setScanMode(mode);
+    setResult(null);
+    setError("");
+  };
   const pick = (selected) => {
     setFile(selected);
     setPreview(URL.createObjectURL(selected));
@@ -42,6 +50,26 @@ export default function InspectPanel() {
       </div>
       <div className="panel-card inspect-card">
         <div className="section-title"><div><h2><ScanLine size={19} /> Ảnh mạch cần quét</h2><p>Ảnh chụp rõ nét, nhìn thấy toàn bộ vùng linh kiện trên PCB</p></div><button className="button button-light button-small" onClick={useSample}><ImagePlus size={15} /> Dùng ảnh mẫu</button></div>
+        <div className="scan-mode-switch" role="group" aria-label="Chế độ quét PCB">
+          <button
+            type="button"
+            className={`scan-mode-option ${scanMode === "standard" ? "active" : ""}`}
+            aria-pressed={scanMode === "standard"}
+            disabled={busy}
+            onClick={() => selectScanMode("standard")}
+          >
+            <ScanLine size={15} /> Quét thông thường
+          </button>
+          <button
+            type="button"
+            className={`scan-mode-option ${scanMode === "tilted" ? "active" : ""}`}
+            aria-pressed={scanMode === "tilted"}
+            disabled={busy}
+            onClick={() => selectScanMode("tilted")}
+          >
+            <RotateCw size={15} /> Căn chỉnh mạch nghiêng
+          </button>
+        </div>
         <div className="inspect-grid">
           <UploadCard title="Tải ảnh PCB cần kiểm tra" description="PNG, JPG hoặc JPEG · tối đa 32 MB" onSelect={pick} preview={preview} />
           <div className="inspect-options">
@@ -50,22 +78,29 @@ export default function InspectPanel() {
             <input type="range" min="0.1" max="0.9" step="0.05" value={conf} onChange={(event) => setConf(Number(event.target.value))} />
             <label className="field-label">Dung sai độ lệch vị trí <strong>{(tolerance * 100).toFixed(1)}%</strong></label>
             <input type="range" min="0.01" max="0.15" step="0.005" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
-            <div
-              className={`toggle-crop-card ${autoCrop ? "active" : ""}`}
-              onClick={() => setAutoCrop((prev) => !prev)}
-              role="button"
-              tabIndex={0}
-              title="Bật/Tắt tự động tìm và cắt bo mạch trước khi kiểm tra"
-            >
-              <div className="toggle-crop-card-info">
-                <Crop size={16} color={autoCrop ? "var(--purple)" : "#7b7c8f"} />
-                <span>Tự động cắt bo mạch (Auto-crop)</span>
+            {scanMode === "tilted" ? (
+              <div className="scan-mode-help">
+                <RotateCw size={16} />
+                <span>Ảnh sẽ được định vị, xoay và cắt theo mạch chuẩn trước khi chạy nhận diện. Nếu không căn chỉnh được với mạch chuẩn, hệ thống sẽ báo lỗi thay vì dùng ảnh chưa căn chỉnh.</span>
               </div>
-              <span className="toggle-crop-card-badge">{autoCrop ? "BẬT" : "TẮT"}</span>
-            </div>
+            ) : (
+              <div
+                className={`toggle-crop-card ${autoCrop ? "active" : ""}`}
+                onClick={() => setAutoCrop((prev) => !prev)}
+                role="button"
+                tabIndex={0}
+                title="Bật/Tắt tự động tìm và cắt bo mạch trước khi kiểm tra"
+              >
+                <div className="toggle-crop-card-info">
+                  <Crop size={16} color={autoCrop ? "var(--purple)" : "#7b7c8f"} />
+                  <span>Tự động cắt bo mạch (Auto-crop)</span>
+                </div>
+                <span className="toggle-crop-card-badge">{autoCrop ? "BẬT" : "TẮT"}</span>
+              </div>
+            )}
             <div className="reference-note"><span className={reference?.components_count ? "text-success" : "text-warning"}>{reference?.components_count ? "●" : "●"}</span> Mạch chuẩn đang có <strong>{reference?.components_count || 0}</strong> linh kiện tham chiếu</div>
-            <button className="button button-primary button-wide" disabled={!file || busy || !reference?.components_count} onClick={() => inspect(file, { conf, tolerance_ratio: tolerance, auto_crop: autoCrop })}>
-              {busy ? <><LoaderCircle className="spin" size={17} /> Đang phân tích ảnh...</> : <><ScanLine size={17} /> Bắt đầu kiểm tra PCB</>}
+            <button className="button button-primary button-wide" disabled={!file || busy || !reference?.components_count} onClick={() => inspect(file, { conf, tolerance_ratio: tolerance, ...(scanMode === "standard" ? { auto_crop: autoCrop } : {}) })}>
+              {busy ? <><LoaderCircle className="spin" size={17} /> Đang phân tích ảnh...</> : scanMode === "tilted" ? <><RotateCw size={17} /> Căn chỉnh & kiểm tra PCB</> : <><ScanLine size={17} /> Bắt đầu kiểm tra PCB</>}
             </button>
             {!reference?.components_count && <small className="form-help">Hãy tải ảnh mạch chuẩn tại trang “Mạch tham chiếu” trước khi kiểm tra.</small>}
           </div>

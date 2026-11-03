@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from backend.app.api.v1.common import run_inspection
 from backend.app.services.pcb_engine import (
     STATUS_FAULTY,
+    STATUS_OK,
     STATUS_REVIEW,
     evaluate_board_status,
     evaluate_component_inventory,
@@ -78,6 +79,73 @@ class ReferenceMatchingTests(unittest.TestCase):
 
         self.assertEqual(status, STATUS_FAULTY)
         self.assertEqual(stats["extra"], 1)
+
+    def test_aligned_verdict_ignores_low_confidence_unmatched_detection(self):
+        reference = [
+            {
+                "id": index + 1,
+                "class": "resistor",
+                "x": 100.0 + index * 100,
+                "y": 100.0,
+                "box_width": 20.0,
+                "box_height": 20.0,
+            }
+            for index in range(11)
+        ]
+        detections = [
+            self.detection(
+                "resistor",
+                (component["x"], component["y"]),
+                (
+                    component["x"] - 10,
+                    component["y"] - 10,
+                    component["x"] + 10,
+                    component["y"] + 10,
+                ),
+            )
+            for component in reference
+        ]
+        detections.append(
+            self.detection("resistor", (178.0, 551.0), (168.0, 541.0, 188.0, 561.0), 0.37)
+        )
+
+        matches, _, used_references = match_components(
+            reference, detections, tolerance=25.0
+        )
+        status, stats = evaluate_board_status(
+            reference, detections, matches, used_references, aligned=True
+        )
+        (
+            inventory_status,
+            inventory_stats,
+            inventory_comparison,
+        ) = evaluate_component_inventory(reference, detections)
+
+        self.assertEqual(status, STATUS_OK)
+        self.assertEqual(stats["matched"], 11)
+        self.assertEqual(stats["missing"], 0)
+        self.assertEqual(stats["extra"], 0)
+        self.assertEqual(inventory_status, STATUS_FAULTY)
+        self.assertEqual(inventory_stats["extra"], 1)
+        self.assertEqual(inventory_comparison[0]["detected_count"], 12)
+
+        detections.extend(
+            self.detection(
+                "resistor",
+                (x, 2500.0),
+                (x - 10, 2490.0, x + 10, 2510.0),
+                0.8,
+            )
+            for x in (2500.0, 3500.0, 4500.0)
+        )
+        matches, _, used_references = match_components(
+            reference, detections, tolerance=25.0
+        )
+        status, stats = evaluate_board_status(
+            reference, detections, matches, used_references, aligned=True
+        )
+        self.assertEqual(status, STATUS_REVIEW)
+        self.assertEqual(stats["extra"], 3)
 
     def test_inventory_class_aliases_are_counted_together(self):
         status, stats, comparison = evaluate_component_inventory(
@@ -185,6 +253,43 @@ class ReferenceMatchingTests(unittest.TestCase):
         self.assertFalse(matches[0]["class_match"])
         self.assertEqual(matched_detections, {0})
         self.assertEqual(used_references, {0})
+
+    def test_wrong_class_box_containing_reference_center_matches_for_review(self):
+        reference = [
+            {
+                "id": 11,
+                "class": "resistor",
+                "x": 270.03,
+                "y": 611.2,
+                "box_width": 51.57,
+                "box_height": 91.69,
+            }
+        ]
+        detections = [
+            self.detection(
+                "capacitor",
+                (274.04, 643.61),
+                (251.29, 602.03, 296.79, 685.19),
+            )
+        ]
+
+        matches, matched_detections, used_references = match_components(
+            reference,
+            detections,
+            tolerance=73.26,
+            allow_location_class_mismatch=True,
+        )
+        status, stats = evaluate_board_status(
+            reference, detections, matches, used_references, aligned=True
+        )
+
+        self.assertEqual(len(matches), 1)
+        self.assertFalse(matches[0]["class_match"])
+        self.assertEqual(matched_detections, {0})
+        self.assertEqual(used_references, {0})
+        self.assertEqual(status, STATUS_REVIEW)
+        self.assertEqual(stats["missing"], 0)
+        self.assertEqual(stats["extra"], 0)
 
     def test_exact_class_match_is_preferred_over_location_fallback(self):
         reference = [

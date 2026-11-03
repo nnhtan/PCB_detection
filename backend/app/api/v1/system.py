@@ -1,10 +1,17 @@
 from pathlib import Path
 
 import torch
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
-from backend.app.api.v1.common import get_pipeline
+from backend.app.api.v1.common import (
+    get_pipeline,
+    resume_conveyor,
+    send_result_to_conveyor,
+)
 from backend.app.core import config
+from backend.app.services.conveyor import ConveyorCommunicationError
 from backend.app.services.pcb_engine import (
     DEFAULT_CONF,
     DEFAULT_EXTRA_ALLOWED,
@@ -14,6 +21,10 @@ from backend.app.services.pcb_engine import (
 )
 
 router = APIRouter()
+
+
+class ConveyorResult(BaseModel):
+    is_ok: bool
 
 
 @router.get("/info")
@@ -54,3 +65,35 @@ def system_info(request: Request):
             "reference_path": str(config.REFERENCE_PATH),
         },
     }
+
+
+@router.post("/conveyor/result")
+async def send_conveyor_result(result: ConveyorResult, request: Request):
+    await send_result_to_conveyor(request, result.is_ok)
+    return {
+        "status": "success",
+        "sent": "OK" if result.is_ok else "FAULTY",
+    }
+
+
+@router.post("/conveyor/resume")
+async def resume_conveyor_belt(request: Request):
+    await resume_conveyor(request)
+    return {"status": "success", "sent": "RESUME"}
+
+
+@router.get("/conveyor/event")
+async def wait_for_conveyor_event(
+    request: Request,
+    timeout: float = Query(1.0, ge=0, le=5),
+):
+    conveyor = request.app.state.conveyor
+    if not config.CONVEYOR_ENABLED or conveyor is None:
+        return {"enabled": False, "event": None}
+
+    try:
+        event = await run_in_threadpool(conveyor.wait_for_event, timeout)
+    except ConveyorCommunicationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"enabled": True, "event": event}

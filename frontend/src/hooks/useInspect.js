@@ -19,6 +19,15 @@ export function useInspect(endpoint = "/api/inspect") {
     try {
       const response = await api.postForm(endpoint, imageForm(image, values));
       setResult(response);
+      if (typeof response.is_ok === "boolean") {
+        try {
+          await api.sendConveyorResult(response.is_ok);
+        } catch (sendError) {
+          setError(
+            `Kết quả đã hiển thị nhưng không gửi được đến ESP: ${sendError.message}`,
+          );
+        }
+      }
       return response;
     } catch (requestError) {
       setError(requestError.message);
@@ -28,5 +37,5 @@ export function useInspect(endpoint = "/api/inspect") {
     }
   };
 
-  return { result, setResult, error, busy, inspect };
+  return { result, setResult, error, setError, busy, inspect };
 }

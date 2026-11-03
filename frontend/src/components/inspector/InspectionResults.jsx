@@ -14,6 +14,8 @@ export default function InspectionResults({ result }) {
   const meta = statusMeta[verdict] || statusMeta.UNALIGNED;
   const StatusIcon = meta.icon;
   const stats = result.stats || {};
+  const comparedWithReference =
+    result.qa_available === true || result.comparison_scope === "reference_position";
   const visibleDetections = (result.detections || []).filter(
     (item) => item.status !== "EXTRA",
   );
@@ -25,22 +27,22 @@ export default function InspectionResults({ result }) {
         {result.comparison_note && <span className="verdict-note">{result.comparison_note}</span>}
       </div>
       <div className="stats-grid">
-        <StatCard label="Linh kiện phát hiện" value={stats.detected_count ?? visibleDetections.length} icon={ScanSearch} />
+        <StatCard label="Linh kiện phát hiện" value={comparedWithReference ? stats.matched ?? visibleDetections.length : stats.detected_count ?? visibleDetections.length} icon={ScanSearch} />
         <StatCard label="Số linh kiện khớp" value={stats.matched ?? "—"} icon={Crosshair} tone="green" />
-        <StatCard label="Linh kiện dư" value={stats.extra ?? 0} icon={CircleAlert} tone="orange" />
+        {!comparedWithReference && <StatCard label="Linh kiện dư" value={stats.extra ?? 0} icon={CircleAlert} tone="orange" />}
         <StatCard label="Linh kiện thiếu" value={stats.missing ?? "—"} icon={CircleAlert} tone="orange" />
         <StatCard label="Thời gian xử lý" value={result.latency_ms ? `${result.latency_ms} ms` : "—"} icon={Clock3} tone="blue" />
       </div>
       {result.inventory_comparison?.length > 0 && (
         <div className="matching-list">
-          <strong>Đối chiếu tổng số linh kiện</strong>
+          <strong>Tổng số detections (thống kê toàn bộ)</strong>
           <span>{result.inventory_comparison.map((item) => `${item.class}: quét ${item.detected_count}/${item.reference_count}${item.missing ? ` · thiếu ${item.missing}` : ""}${item.extra ? ` · dư ${item.extra}` : ""}`).join(" · ")}</span>
         </div>
       )}
       {result.board_crop_image && (
         <div className="result-image-card">
-          <div className="section-title"><div><h3>Ảnh PCB sau Auto-Crop</h3><p>Kiểm tra bo mạch có đủ bốn góc và không bị xoay hoặc mất phần</p></div><span className="image-tag">CROP · {result.crop_method || "không xác định"}</span></div>
-          <img className="result-image" src={result.board_crop_image} alt="Ảnh PCB sau khi cắt tự động" />
+          <div className="section-title"><div><h3>Ảnh PCB sau căn chỉnh/cắt</h3><p>Bo mạch sau khi tách vùng và căn về hướng mạch chuẩn</p></div><span className="image-tag">CROP · {result.crop_method || "không xác định"}</span></div>
+          <img className="result-image" src={result.board_crop_image} alt="Ảnh PCB sau khi căn chỉnh và cắt" />
         </div>
       )}
       {result.annotated_image && (

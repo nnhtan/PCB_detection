@@ -1,11 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from backend.app.services.pcb_engine import (
     estimate_component_alignment,
+    find_board_corners,
     find_reference_board_corners,
+    order_board_corners_for_reference,
     rectify_board,
     rectify_board_to_reference,
     warp_board_to_reference,
@@ -61,6 +64,60 @@ class ComponentHomographyTests(unittest.TestCase):
             corners.reshape(-1, 1, 2), transform
         )
         np.testing.assert_allclose(actual_corners, expected_corners, atol=1e-3)
+
+    def test_board_contour_keeps_long_edge_horizontal_across_tilt_angles(self):
+        reference_aspect = 2.25
+        background = np.full((600, 800, 3), 220, dtype=np.uint8)
+
+        for angle in range(-60, 61, 5):
+            frame = background.copy()
+            rectangle = ((400, 300), (450, 200), angle)
+            cv2.fillConvexPoly(
+                frame,
+                cv2.boxPoints(rectangle).astype(np.int32),
+                (40, 80, 120),
+            )
+            corners = find_board_corners(
+                frame,
+                reference_aspect=reference_aspect,
+                padding_ratio=0.0,
+                include_dark_regions=True,
+            )
+
+            self.assertIsNotNone(corners, f"contour not found at {angle} degrees")
+            ordered = order_board_corners_for_reference(
+                corners, reference_aspect
+            )
+            first_edge = np.linalg.norm(ordered[1] - ordered[0])
+            second_edge = np.linalg.norm(ordered[2] - ordered[1])
+            self.assertGreater(first_edge, second_edge)
+
+    def test_dark_board_is_found_when_background_edges_join_frame_border(self):
+        frame = np.full((600, 800, 3), 235, dtype=np.uint8)
+        board = cv2.boxPoints(((400, 300), (450, 200), 18)).astype(np.int32)
+        cv2.fillConvexPoly(frame, board, (25, 25, 25))
+        frame_edges = np.zeros((480, 640), dtype=np.uint8)
+        cv2.rectangle(frame_edges, (0, 0), (639, 479), 255, 2)
+        with patch("backend.app.services.pcb_engine.cv2.Canny") as canny:
+            canny.return_value = frame_edges.copy()
+            original_corners = find_board_corners(
+                frame,
+                reference_aspect=2.25,
+                padding_ratio=0.0,
+            )
+            tilted_corners = find_board_corners(
+                frame,
+                reference_aspect=2.25,
+                padding_ratio=0.0,
+                include_dark_regions=True,
+            )
+
+        self.assertIsNone(original_corners)
+        self.assertIsNotNone(tilted_corners)
+        ordered = order_board_corners_for_reference(tilted_corners, 2.25)
+        first_edge = np.linalg.norm(ordered[1] - ordered[0])
+        second_edge = np.linalg.norm(ordered[2] - ordered[1])
+        self.assertGreater(first_edge, second_edge)
 
     def test_alignment_warp_outputs_reference_sized_rectified_crop(self):
         frame = np.zeros((100, 140, 3), dtype=np.uint8)

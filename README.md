@@ -24,7 +24,7 @@
 - **Kết quả trực quan:** ảnh đánh dấu detections, số lượng linh kiện, kết quả đối chiếu và thời gian xử lý.
 - **API docs:** FastAPI Swagger UI tại `/docs`.
 
-Việc kết luận `OK` hoặc `FAULTY` cần căn chỉnh được ảnh với mạch chuẩn. Nếu ảnh đã nhận diện được linh kiện nhưng không căn chỉnh được, kết quả có trạng thái `UNALIGNED`; hệ thống không giả kết luận linh kiện thiếu/thừa.
+Khi đã căn chỉnh với mạch chuẩn, kết luận dựa trên đối chiếu vị trí từng linh kiện; tổng số detections được hiển thị riêng, và detection dư có độ tin cậy thấp không tự làm mạch bị lỗi. Nếu ảnh đã nhận diện được linh kiện nhưng không căn chỉnh được, kết quả có trạng thái `UNALIGNED`; hệ thống không giả kết luận linh kiện thiếu/thừa.
 
 ## Cấu trúc dự án
 
@@ -166,9 +166,10 @@ Mỗi mạch chuẩn được lưu riêng trong `backend\storage\references\<id>
 
 1. Mở **Kiểm tra PCB**.
 2. Tải ảnh PCB cần quét. Đây là ảnh riêng, không ghi đè ảnh scan vào thao tác nạp reference.
-3. Chỉnh confidence, dung sai vị trí hoặc tự động tìm vùng PCB nếu cần.
-4. Chọn **Bắt đầu kiểm tra PCB**.
-5. Xem kết quả và danh sách detections. `OK`/`FAULTY` chỉ được đưa ra khi căn chỉnh thành công; `UNALIGNED` nghĩa là đã nhận diện nhưng chưa so sánh được vị trí với reference.
+3. Chọn **Quét thông thường** để dùng luồng hiện tại, hoặc **Căn chỉnh mạch nghiêng** để định vị PCB bằng đặc trưng ảnh, xoay/cắt về khung reference rồi kiểm tra. Chế độ căn chỉnh mạch nghiêng sẽ báo lỗi nếu không khớp được ảnh với reference.
+4. Chỉnh confidence và dung sai vị trí nếu cần. Tự động cắt vùng PCB chỉ áp dụng cho chế độ thông thường.
+5. Chọn nút bắt đầu kiểm tra tương ứng với chế độ đã chọn.
+6. Xem ảnh PCB đã căn chỉnh và kết quả/danh sách detections. Khi căn chỉnh thành công, `OK`/`FAULTY`/`REVIEW` được quyết định theo đối chiếu vị trí; tổng số detections vẫn được báo riêng. `UNALIGNED` nghĩa là đã nhận diện nhưng chưa so sánh được vị trí với reference.
 
 Khi đã căn chỉnh và detection sai lớp nằm trong bán kính vị trí theo kích thước linh kiện tham chiếu, detection được ghép với reference dù hộp không chứa chính xác tâm reference; lớp reference được dùng làm nhãn chính và QA không tính đó là mismatch. Lớp YOLO cùng confidence gốc vẫn được giữ trong `yolo_class` và hiển thị trong bảng/nhãn ảnh để đối chiếu. Vì reference là nguồn quyết định lớp trong chế độ này, kết quả không xác nhận độc lập linh kiện lắp thực tế có đúng loại hay không; cần kiểm tra ảnh nếu YOLO bất đồng. Khi nhiều lớp dự đoán cùng một vùng, chúng được giữ lại cho đối chiếu; trong kiểm tra đã căn chỉnh, nếu một ứng viên khớp lớp reference tại đúng vị trí thì các ứng viên lớp khác chồng lấp tại cùng linh kiện bị loại kể cả khi hộp có kích thước chênh lệch lớn. Các detection khớp chính xác với reference của linh kiện lân cận luôn được giữ. Nhận diện YOLO độc lập vẫn giữ các lớp chồng lấp khác nhau để tránh xóa mất dự đoán thay thế.
 
@@ -203,6 +204,7 @@ Các endpoint có tại `/api/...`. Alias tương thích cũng được cung c�
 | `GET` | `/api/sample` | Trả ảnh mẫu dưới dạng data URI |
 | `POST` | `/api/detect` | YOLO detection độc lập |
 | `POST` | `/api/inspect` | Detection, căn chỉnh và QA theo reference |
+| `POST` | `/api/inspect/tilted` | Căn chỉnh nghiêng theo reference, cắt PCB rồi chạy QA |
 | `GET` | `/api/camera/status` | Trạng thái camera hiện tại |
 | `POST` | `/api/camera/connect` | Kết nối camera |
 | `POST` | `/api/camera/disconnect` | Ngắt camera |
@@ -220,11 +222,17 @@ Các endpoint upload ảnh nhận `multipart/form-data`, trường file bắt bu
 - `/api/reference/update`: `image`, `name` (tùy chọn), `conf`, `imgsz`. Nếu bỏ `name`, tên file upload được dùng.
 - `/api/reference/select`: `reference_id` (ID lấy từ danh sách `catalog` của `/api/reference`).
 - `/api/inspect`: `image`, `conf`, `imgsz`, `tolerance_ratio`, `extra_allowed`, `missing_allowed`, `auto_crop`.
+- `/api/inspect/tilted`: `image`, `conf`, `imgsz`, `tolerance_ratio`, `extra_allowed`, `missing_allowed`. Trả HTTP 422 nếu không căn chỉnh được ảnh scan với reference.
 - `/api/camera/connect`: `source`.
-- `/api/camera/scan`: `conf`, `imgsz`, `tolerance_ratio`.
-- `/api/camera/snapshot`: `source`, `conf`, `imgsz`, `tolerance_ratio`.
+- `/api/camera/scan`: `conf`, `imgsz` (mặc định `1024`), `tolerance_ratio`, `auto_crop`, `fast_mode`, `scan_mode` (`standard` hoặc `tilted_reference`).
+- `/api/camera/snapshot`: `source`, `conf`, `imgsz` (mặc định `1024`), `tolerance_ratio`, `auto_crop`, `scan_mode` (`standard` hoặc `tilted_reference`).
+- `/api/conveyor/result`: JSON `{"is_ok": true}` hoặc `{"is_ok": false}` để gửi kết quả đang hiển thị trên web đến ESP.
 
 Khi `auto_crop` được bật (mặc định), `/api/camera/scan` và `/api/inspect` trước tiên dùng ORB để tìm phép chiếu từ frame camera sang mạch tham chiếu; nếu thành công, OpenCV cắt/nắn PCB trực tiếp về đúng kích thước và chiều của ảnh reference. Chỉ khi không căn được theo reference, pipeline mới thử `PCBMonoCropper`, contour và ROI. Với các đường fallback, ảnh crop hiển thị cũng được nắn theo phép căn chỉnh cuối cùng; homography ORB hợp lệ được ưu tiên hơn affine để giảm nghiêng phối cảnh, đồng thời hộp detection và dấu linh kiện thiếu được vẽ trong cùng hệ tọa độ reference. Sau khi chuẩn hóa PCB, pipeline dùng SAHI overlap 20% để chia ảnh thành tile và phát hiện linh kiện; quét camera mặc định dùng chế độ nhanh tile 960 px để giảm độ trễ, có thể chuyển sang `fast_mode=false` để quét chi tiết với tile 320 px và ưu tiên linh kiện nhỏ; cả hai chế độ giữ `imgsz=1536`. Chế độ chi tiết bật test-time augmentation (TTA) cho lượt YOLO toàn ảnh và gom 2 tile/lượt trên GPU CUDA; chế độ nhanh tắt TTA và giữ batch 1. Benchmark trên ảnh mẫu cho thấy chế độ nhanh hoàn tất quét và ghép đủ 11/11 linh kiện trong khoảng 0,6 giây, nhanh hơn khoảng 3,2 lần so với chế độ chi tiết; kết quả còn tùy ảnh và phần cứng. Thử tăng batch lên 2/4 hoặc bật FP16 trên NVIDIA T600 không cải thiện thời gian ở ảnh mẫu, nên không bật các tùy chọn đó mặc định. Các hộp cùng lớp chồng ít nhất 50% diện tích hộp nhỏ hơn được gộp nếu chênh lệch diện tích không quá 4 lần. Hộp khác lớp không bị loại chỉ vì chồng lấp; khi căn chỉnh với reference, dự đoán cùng lớp tại đúng vị trí được ưu tiên, còn khi không có ứng viên cùng lớp thì dự đoán confidence cao nhất được giữ với trạng thái `REVIEW`. Phản hồi có `alignment_transform`, `orientation_transform` và `crop_method` để kiểm tra phép biến đổi và cách cắt đã dùng.
+
+`/api/inspect/tilted` là luồng riêng cho ảnh PCB đặt nghiêng: ưu tiên dò contour bo mạch bằng cạnh ảnh và vùng tối, chuẩn hóa cạnh dài theo hướng reference rồi xoay/nắn và cắt về khung reference; ORB homography chỉ là phương án dự phòng. Cách dò vùng tối chỉ bật trong luồng nghiêng; Auto-Crop của chế độ tiêu chuẩn giữ nguyên cách tìm contour cũ. Nếu không tìm thấy PCB hoặc không căn được ảnh, pipeline dừng trước khi nhận diện thay vì phân loại nền. Luồng này không dùng fallback auto-crop, đồng thời giữ nguyên YOLO và tiền xử lý hiện hành.
+
+Trong trang **Camera trực tiếp**, chế độ **Quét nhanh** tiêu chuẩn dùng `imgsz=1024` và lát SAHI 960 px; **Quét chi tiết** dùng `imgsz=1536` và lát 320 px để ưu tiên linh kiện nhỏ. Khi **Căn theo chuẩn** bật, ảnh suy luận dùng `imgsz=1536` ngay cả ở chế độ lát nhanh để tránh dự đoán dư đã quan sát được ở `imgsz=1024`; chế độ lát nhanh vẫn dùng SAHI 960 px. Camera cũng chọn frame có PCB rõ biên và xa mép nhất trong 12 frame gần nhất, dò contour từ cạnh ảnh hoặc vùng tối, dùng ORB homography nếu không tìm được contour và bỏ qua Auto-Crop thường để tránh crop lại ảnh đã căn. Nếu không thấy PCB trong lịch sử frame hoặc không căn được, API trả HTTP 422 và frame đó không được nhận diện/cộng vào bộ đếm. Tắt công tắc để quay lại quy trình camera tiêu chuẩn.
 
 Thông số kiểm tra mặc định trong pipeline: confidence `0.35`, ảnh YOLO `1536`, dung sai vị trí `0.045` (4.5% cạnh lớn nhất của ảnh reference, tối đa 15%), số linh kiện thiếu cho phép `0`, số linh kiện thừa cho phép `2`. Việc ghép linh kiện luôn phải thỏa dung sai khoảng cách tâm; hộp detection bao trùm điểm reference không đủ để được tính là khớp. Có thể xem thông số hiện hành tại `/api/info`.
 
@@ -247,6 +255,21 @@ Backend đọc các biến môi trường sau khi khởi động:
 | `PCB_REFERENCE_IMAGE_PATH` | `backend\storage\reference.jpg` | Ảnh reference ban đầu dùng khi khởi tạo danh mục lần đầu |
 | `PCB_SAMPLE_IMAGE_PATH` | `backend\storage\sample.jpg`; nếu không có thì dùng `2.jpg` ở repo root | Ảnh mẫu của API |
 | `PCB_CAMERA_SOURCE` | `0` | Webcam index hoặc URL camera mặc định cho API |
+| `PCB_CONVEYOR_ENABLED` | `false` | Bật gửi verdict kiểm định qua Serial cho ESP |
+| `PCB_SERIAL_PORT` | `COM3` | Cổng Serial của ESP32 trên máy hiện tại; đổi nếu Windows gán COM khác |
+| `PCB_SERIAL_BAUDRATE` | `115200` | Tốc độ Serial |
+| `PCB_SERIAL_TIMEOUT` | `5` | Thời gian chờ ESP xác nhận, tính bằng giây |
+
+Khi bật `PCB_CONVEYOR_ENABLED`, giữ trang Camera mở và kết nối camera để nhận sự kiện `EVENT:SENSOR1` từ ESP qua Serial; mỗi cạnh phát hiện mới ở cảm biến 1 sẽ chờ 1,5 giây để băng tải dừng hẳn rồi tự kích hoạt một lượt quét camera. Sau khi quét, giao diện gửi verdict `OK` hoặc `FAULTY` tới `POST /api/conveyor/result` nếu có kết quả, rồi gửi `RESUME` tới `POST /api/conveyor/resume` để băng tải chạy tiếp. Trạng thái chưa căn chỉnh không được coi là mạch lỗi và không gửi verdict. Khi mạch tới cảm biến 2, ESP chạy servo 1 nếu mạch đạt; nếu mạch lỗi thì servo 1 và servo 2 cùng chạy. Băng tải tiếp tục sau khi các servo hoàn tất. Nếu cảm biến 2 phát hiện mạch trước khi có verdict, ESP dừng và chờ kết quả từ web. Gửi Serial kết thúc bằng newline.
+
+Đóng PlatformIO Serial Monitor trước khi chạy backend vì hai chương trình không thể cùng chiếm một cổng COM. Ví dụ bật tích hợp trong PowerShell:
+
+```powershell
+$env:PCB_CONVEYOR_ENABLED = "true"
+$env:PCB_SERIAL_PORT = "COM3"
+$env:PCB_SERIAL_BAUDRATE = "115200"
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
 
 Ví dụ cấu hình camera IP cho backend trong PowerShell:
 

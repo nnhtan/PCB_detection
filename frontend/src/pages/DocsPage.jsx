@@ -14,7 +14,7 @@ const endpoints = [
   ["GET", "/api/camera/status", "Trạng thái camera"],
   ["POST", "/api/camera/connect", "Kết nối webcam hoặc camera IP"],
   ["GET", "/api/camera/stream", "Luồng hình MJPEG"],
-  ["POST", "/api/camera/scan", "Quét frame mới nhất; mặc định dùng chế độ nhanh tile 960 px; fast_mode=false chuyển sang tile 320 px để ưu tiên linh kiện nhỏ"],
+  ["POST", "/api/camera/scan", "Quét camera; mặc định imgsz=1024, scan_mode=tilted_reference chọn frame PCB rõ nhất và dùng imgsz=1536"],
 ];
 
 export default function DocsPage() {
